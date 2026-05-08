@@ -1303,6 +1303,9 @@ def build(build_dir, log, done_cb, error_cb):
             "Please install:\n"
             + ("  • Git:    https://git-scm.com/download/win\n" if "git" in missing else "")
             + ("  • Node.js: https://nodejs.org (LTS version)\n" if "node" in missing else "")
+            + "If this message continues to appear, run powershell as administrator and run\n"
+            + "Set-ExecutionPolicy RemoteSigned -Scope CurrentUser\n"
+            + "Then run archipelago as an administrator."
         )
         return
 
