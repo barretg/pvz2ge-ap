@@ -2,13 +2,14 @@
 PvZ2 Gardendless — Archipelago World
 
 Each world (except Ancient Egypt) is unlocked by finding its unique Key item.
-Modern Day requires defeating a configurable number of Zomboss fights first.
+Modern Day requires the Modern Day Key plus a configurable number of world
+completions (beat the final level) or world trophies (mid-world milestone).
 Victory = defeat the Modern Day Zomboss.
 """
 
 from worlds.AutoWorld import World, WebWorld
 from BaseClasses import Region, Location, Item, ItemClassification, Tutorial
-from Options import Range, PerGameCommonOptions
+from Options import Choice, Range, PerGameCommonOptions
 from settings import get_settings
 import settings
 from typing import Dict, List, Any
@@ -86,29 +87,36 @@ KEYED_WORLDS = [
     "Kongfu Temple", "Neon Mixtape Tour", "Jurassic Marsh", "Modern Day", "Aerial Fortress",
 ]
 
-# Zomboss location name per world (these are the boss fights)
-# Defeating these (except Modern Day) counts toward unlocking Modern Day
-ZOMBOSS_LOCATION = {
-    "Ancient Egypt":    "random_zomboss_egypt",
-    "Pirate Seas":      "random_zomboss_pirate",
-    "Wild West":        "random_zomboss_cowboy",
-    "Far Future":       "random_zomboss_future",
-    "Dark Ages":        "random_zomboss_dark",
-    "Big Wave Beach":   "random_beach",
-    "Frostbite Caves":  "iceage_dangerroom",
-    "Lost City":        "lostcity_dangerroom",
-    "Kongfu Temple":    "kongfu_dangerroom",
-    "Neon Mixtape Tour":"eighties_dangerroom",
-    "Jurassic Marsh":   "dino_dangerroom",
-    "Modern Day":       "modern_zomboss_01_egypt",
-}
+# World Trophy locations — the mid-world milestone check in each world.
+# Kongfu Temple has no world trophy in the game data and is excluded.
+# Modern Day and Aerial Fortress are excluded (goal world / post-unlock).
+WORLD_TROPHY_LOCS = [
+    "Worldtrophy Egypt Unlock",    # egypt25
+    "Worldtrophy Pirate Unlock",   # pirate25
+    "Worldtrophy Cowboy Unlock",   # cowboy25
+    "Worldtrophy Future Unlock",   # future25
+    "Worldtrophy Dark Unlock",     # dark20
+    "Worldtrophy Beach Unlock",    # beach32
+    "Worldtrophy Iceage Unlock",   # iceage30
+    "Worldtrophy Lostcity Unlock", # lostcity32
+    "Worldtrophy Eighties Unlock", # eighties32
+    "Worldtrophy Dino Unlock",     # dino32
+]  # 10 total (Kongfu excluded — no trophy in game data)
 
-# Non-Modern Day zomboss location names (count toward Modern Day unlock)
-COUNTING_ZOMBOSS_LOCS = [
-    "random_zomboss_egypt", "random_zomboss_pirate", "random_zomboss_cowboy",
-    "random_zomboss_future", "random_zomboss_dark", "random_beach",
-    "iceage_dangerroom", "lostcity_dangerroom", "kongfu_dangerroom",
-    "eighties_dangerroom", "dino_dangerroom",
+# World Completion locations — the final regular level of each world.
+# Modern Day and Aerial Fortress are excluded.
+WORLD_COMPLETION_LOCS = [
+    "egypt35",    # Ancient Egypt
+    "pirate35",   # Pirate Seas
+    "cowboy35",   # Wild West
+    "future35",   # Far Future
+    "dark30",     # Dark Ages
+    "beach42",    # Big Wave Beach
+    "iceage40",   # Frostbite Caves
+    "lostcity42", # Lost City
+    "kongfu48",   # Kongfu Temple
+    "eighties32", # Neon Mixtape Tour
+    "dino42",     # Jurassic Marsh
 ]  # 11 total
 
 SIDE_PATH_REGIONS = [
@@ -129,13 +137,30 @@ SIDE_PATH_REGIONS = [
 
 # ── Options ───────────────────────────────────────────────────────────────────
 
-class ZombossesRequired(Range):
+class GoalType(Choice):
     """
-    How many Zomboss fights (outside Modern Day) must be defeated before
-    Modern Day unlocks. Requires also having the Modern Day Key.
-    Range: 1-11 (there are 11 non-Modern Day worlds with Zomboss fights).
+    Condition that must be met (along with the Modern Day Key) before Modern Day unlocks.
+
+    world_trophies: Earn N world trophies (the mid-world milestone check in each world).
+      Note: Kongfu Temple has no world trophy in the game data and is always excluded,
+      so the effective maximum for this mode is 10.
+
+    world_completions: Beat the final regular level of N worlds (e.g. egypt35).
+      All 11 non-Modern-Day worlds are eligible; maximum is 11.
     """
-    display_name = "Zombosses Required for Modern Day"
+    display_name = "Modern Day Goal Type"
+    option_world_trophies    = 0
+    option_world_completions = 1
+    default = 0
+
+
+class WorldsRequired(Range):
+    """
+    How many worlds must satisfy the goal condition before Modern Day unlocks.
+    For world_trophies the effective cap is 10 (Kongfu Temple excluded).
+    For world_completions the cap is 11.
+    """
+    display_name = "Worlds Required for Modern Day"
     range_start  = 1
     range_end    = 11
     default      = 7
@@ -143,7 +168,8 @@ class ZombossesRequired(Range):
 
 @dataclasses.dataclass
 class PvZ2Options(PerGameCommonOptions):
-    zombosses_required: ZombossesRequired
+    goal_type:       GoalType
+    worlds_required: WorldsRequired
 
 
 # ── Items ─────────────────────────────────────────────────────────────────────
@@ -1170,18 +1196,21 @@ class PvZ2GardendlessWorld(World):
                 lambda state, k=key_name: state.has(k, self.player)
             )
 
-        # Modern Day — requires its key AND N zomboss defeats
-        req = self.options.zombosses_required.value
+        # Modern Day — requires its key AND N world goals
+        req       = self.options.worlds_required.value
+        goal_locs = (WORLD_TROPHY_LOCS
+                     if self.options.goal_type == GoalType.option_world_trophies
+                     else WORLD_COMPLETION_LOCS)
         md_key = "Modern Day Key"
 
-        def modern_day_rule(state, key=md_key, n=req):
+        def modern_day_rule(state, key=md_key, n=req, locs=goal_locs):
             if not state.has(key, self.player):
                 return False
-            defeated = sum(
-                1 for loc_name in COUNTING_ZOMBOSS_LOCS
+            completed = sum(
+                1 for loc_name in locs
                 if state.can_reach(loc_name, "Location", self.player)
             )
-            return defeated >= n
+            return completed >= n
 
         tutorial.connect(regions["Modern Day"], "Enter Modern Day", modern_day_rule)
 
@@ -1229,10 +1258,14 @@ class PvZ2GardendlessWorld(World):
                 loc.access_rule = lambda state: state.has("Perfume-shroom", self.player)
 
     def fill_slot_data(self) -> Dict[str, Any]:
+        goal_locs = (WORLD_TROPHY_LOCS
+                     if self.options.goal_type == GoalType.option_world_trophies
+                     else WORLD_COMPLETION_LOCS)
         return {
-            "death_link":          False,
-            "game_version":        "0.8.x",
-            "zombosses_required":  self.options.zombosses_required.value,
-            "victory_locations":   VICTORY_LOC_NAMES,
-            "counting_zomboss":    COUNTING_ZOMBOSS_LOCS,
+            "death_link":      False,
+            "game_version":    "0.8.x",
+            "goal_type":       self.options.goal_type.current_key,
+            "worlds_required": self.options.worlds_required.value,
+            "goal_locations":  goal_locs,
+            "victory_locations": VICTORY_LOC_NAMES,
         }

@@ -1015,19 +1015,9 @@ window.electron = electron;
     return null;
   }
 
-  const VICTORY_LOCS = [
-    'random_zomboss_egypt',
-    'random_zomboss_pirate',
-    'random_zomboss_cowboy',
-    'random_zomboss_future',
-    'random_zomboss_dark',
-    'random_beach',
-    'iceage_dangerroom',
-    'lostcity_dangerroom',
-    'kongfu_dangerroom',
-    'eighties_dangerroom',
-    'dino_dangerroom',
-  ];
+  // Populated from slot_data on connect
+  let goalLocs = [];
+  let worldsReq = 7;
 
   // ── State ─────────────────────────────────────────────────────────────────
   // Rebuild _AP_grantedPlantIds from persisted st.receivedItems.
@@ -1044,7 +1034,7 @@ window.electron = electron;
   }
 
   let cfg   = { server:'localhost:38281', slot:'', password:'' };
-  let st    = { checked:[], lastIdx:0, zombossesRequired:7, receivedKeys:[], receivedItems:[], runKey:'' };
+  let st    = { checked:[], lastIdx:0, receivedKeys:[], receivedItems:[], runKey:'' };
   let sessionActive = false; // set true only after explicit Connect + server ack
 
   // Load persisted state and rebuild granted set SYNCHRONOUSLY right now,
@@ -1236,15 +1226,14 @@ window.electron = electron;
         const runKey = cfg.slot + '@' + (window._AP_seedName||'');
         if(st.runKey !== runKey){
           // New seed or new slot — reset all state so old checks/items don't bleed over
-          st = { checked:[], lastIdx:0, zombossesRequired:7,
-                 receivedKeys:[], receivedItems:[], runKey };
+          st = { checked:[], lastIdx:0, receivedKeys:[], receivedItems:[], runKey };
           window._AP_grantedPlantIds = new Set();
           svSt();
           toast('New seed detected — state reset','#fa0');
         }
-        if(pkt.slot_data && pkt.slot_data.zombosses_required !== undefined){
-          st.zombossesRequired = pkt.slot_data.zombosses_required;
-          svSt();
+        if(pkt.slot_data){
+          goalLocs  = pkt.slot_data.goal_locations  || [];
+          worldsReq = pkt.slot_data.worlds_required || 7;
         }
         const ids=st.checked.map(n=>locIds[n]).filter(Boolean);
         if(ids.length) send([{cmd:'LocationChecks',locations:ids}]);
@@ -1297,8 +1286,8 @@ window.electron = electron;
   // ── Location polling (every 2s) ───────────────────────────────────────────
   function canAccessModernDay(){
     if(!st.receivedKeys || !st.receivedKeys.includes('Modern Day Key')) return false;
-    const beaten = VICTORY_LOCS.filter(l=>st.checked.includes(l)).length;
-    return beaten >= (st.zombossesRequired||7);
+    const completed = goalLocs.filter(l=>st.checked.includes(l)).length;
+    return completed >= worldsReq;
   }
 
   function pollChecks(){
@@ -1397,7 +1386,7 @@ window.electron = electron;
     };
     document.getElementById('ap-reset').onclick=()=>{
       if(!confirm('Reset all AP progress for this slot? This clears checked locations, received items, and run state.')) return;
-      st={checked:[],items:[],keys:[],zombosses:0,runKey:''};
+      st={checked:[],lastIdx:0,receivedKeys:[],receivedItems:[],runKey:''};
       svSt();
       window._AP_grantedPlantIds=new Set();
       log('State reset.');toast('AP state cleared','#a5b4fc');
