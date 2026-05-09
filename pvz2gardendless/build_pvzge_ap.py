@@ -47,6 +47,44 @@ const electron = {
 };
 window.electron = electron;
 
+// ── Capture AllPlayerProperties from SystemJS ─────────────────────────────────
+// The game uses SystemJS module loading. We intercept the module registration
+// for PlayerProperties.ts to capture AllPlayerProperties before the game starts.
+// This gives us a live reference to the in-memory player data object.
+(function() {
+  function installAPHooks(AP) {
+    // Intercept ALL unlockPlant calls — block every plant the game tries to
+    // unlock (tutorial rewards, level completion rewards, everything) unless
+    // AP has explicitly granted it via a received item.
+    const _origUnlockPlant = AP.unlockPlant.bind(AP);
+    AP.unlockPlant = function(plantId) {
+      const granted = window._AP_grantedPlantIds || new Set();
+      if (!granted.has(plantId)) return; // not granted by AP yet — block it
+      return _origUnlockPlant(plantId);
+    };
+    AP._ap_hooked = true;
+  }
+
+  const _origRegister = System.register.bind(System);
+  System.register = function(name, deps, declare) {
+    if (typeof name === 'string' && name.includes('PlayerProperties.ts')) {
+      const _origDeclare = declare;
+      declare = function(_export, _context) {
+        const result = _origDeclare(function(exportName, value) {
+          if (exportName === 'AllPlayerProperties') {
+            window._AP_AllPlayerProperties = value;
+            // Install hooks immediately so BASEUNLOCKLIST calls are intercepted
+            installAPHooks(value);
+          }
+          return _export(exportName, value);
+        }, _context);
+        return result;
+      };
+    }
+    return _origRegister(name, deps, declare);
+  };
+})();
+
 // ── Archipelago Client ────────────────────────────────────────────────────────
 (function () {
   'use strict';
@@ -58,8 +96,9 @@ window.electron = electron;
   const AP_VER     = { major: 0, minor: 5, build: 0 };
 
   // World enum IDs (from WorldMapSceneDisplayEnum in game source)
+  // World enum IDs (WorldMapSceneDisplayEnum from game source)
   const W = { egypt:1, pirate:2, cowboy:3, future:4, dark:5, beach:6,
-               iceage:7, lostcity:8, epic:9, eighties:10, dino:11, modern:12, kongfu:13 };
+               iceage:7, lostcity:8, epic:9, eighties:10, dino:11, modern:12, kongfu:13, sky:26 };
 
   // Plant enum IDs (from PlantEnum in game source)
   const P = {
@@ -91,9 +130,46 @@ window.electron = electron;
     Cantaloupe:164, Iceweed:165
   };
 
-  // id -> lowercase codename (save key)
-  const ID_TO_CN = {};
-  for (const [k,v] of Object.entries(P)) ID_TO_CN[v] = k.toLowerCase();
+  // id -> actual CODENAME from PlantFeatures.json (game's save key)
+  // These are the exact strings used as keys in plantProps in the save data.
+  // Generated from PlantFeatures.json - do NOT use P enum key names, they differ!
+  const ID_TO_CN = {
+    0:'peashooter', 1:'sunflower', 2:'wallnut', 3:'potatomine',
+    4:'cabbagepult', 5:'bloomerang', 6:'iceburg', 7:'bonkchoy',
+    8:'repeater', 12:'gravebuster', 13:'pumpkin', 14:'pvine',
+    16:'firepeashooter', 17:'threepeater', 18:'primalpeashooter',
+    19:'rotobaga', 20:'homingthistle', 21:'starfruit', 22:'shootingstarfruit',
+    23:'lilypad', 24:'sunshroom', 25:'twinsunflower', 26:'dragonbruit',
+    27:'moonflower', 28:'snowpea', 29:'lightningreed', 30:'kernelpult',
+    31:'meteorflower', 32:'springbean', 33:'umbrellaleaf',
+    34:'melonpult', 35:'wintermelon', 36:'blover', 37:'spikeweed',
+    38:'spikerock', 39:'chomper', 41:'primalwallnut', 42:'buttercup',
+    43:'banana', 44:'missiletoe', 45:'cherry_bomb', 46:'doomshroom',
+    47:'cranjelly', 49:'torchwood', 50:'jalapeno', 51:'puffshroom',
+    52:'gloomvine', 53:'vamporcini', 54:'primalpotatomine',
+    55:'cactus', 56:'powerlily', 57:'coconutcannon', 58:'peapod',
+    59:'snapdragon', 60:'gatling', 61:'splitpea', 62:'chilibean',
+    63:'tallnut', 64:'hurrikale', 65:'stallia', 66:'electricpeashooter',
+    67:'squash', 68:'gloomshroom', 69:'magnifyinggrass', 70:'celerystalker',
+    71:'sapfling', 72:'parsnip', 73:'explodeonut', 74:'grapeshot',
+    75:'plantern', 76:'peach', 77:'jackolantern', 78:'dandelion',
+    79:'chardguard', 80:'hypnoshroom', 81:'electriccurrant',
+    82:'escaperoot', 83:'imitater', 84:'shadowshroom', 85:'magnetshroom',
+    87:'empea', 88:'citron', 89:'laser_bean', 90:'solartomato',
+    97:'powerplant', 106:'applemortar', 107:'redstinger', 108:'skyshooter',
+    109:'sunbean', 110:'peanut', 114:'tanglekelp', 115:'bowlingbulb',
+    120:'guacodile', 127:'ghostpepper', 128:'sweetpotato', 129:'pepperpult',
+    130:'hotpotato', 131:'stunion', 132:'goldleaf', 133:'akee',
+    134:'endurian', 135:'toadstool', 136:'lavaguava', 137:'phatbeet',
+    138:'strawburst', 139:'thymewarp', 141:'seashroom', 142:'garlic',
+    143:'electricblueberry', 144:'sporeshroom', 145:'intensivecarrot',
+    146:'primalsunflower', 147:'moonbean', 148:'coldsnapdragon',
+    149:'nightshade', 150:'dusklobber', 151:'grimrose', 152:'goldbloom',
+    153:'bloominghearts', 154:'shrinkingviolet', 155:'hotdate',
+    156:'firegourd', 157:'bambooshoot', 158:'snowdrop', 159:'lychee',
+    160:'perfumeshroom', 161:'solarsage', 162:'bamboozle',
+    164:'cantaloupe', 165:'iceweed',
+  };
 
   // AP item name -> plant enum ID
   const ITEM_PLANT = {
@@ -148,886 +224,698 @@ window.electron = electron;
   };
 
   // World Key gates: [keysNeeded, [worldIds]]
-  const KEY_GATES = [
-    [1,[W.pirate]],[2,[W.cowboy]],[3,[W.future]],[4,[W.dark]],[5,[W.beach]],
-    [6,[W.iceage]],[7,[W.lostcity]],[8,[W.eighties,W.kongfu]],[9,[W.dino]],[10,[W.modern]]
-  ];
+  // Unique world key items -> which world they unlock
+  // Each key unlocks exactly one world. No progressive gating.
+  const WORLD_KEY_MAP = {
+    'Pirate Seas Key':      [W.pirate],
+    'Wild West Key':        [W.cowboy],
+    'Far Future Key':       [W.future],
+    'Dark Ages Key':        [W.dark],
+    'Big Wave Beach Key':   [W.beach],
+    'Frostbite Caves Key':  [W.iceage],
+    'Lost City Key':        [W.lostcity],
+    'Kongfu Temple Key':    [W.eighties, W.kongfu],  // both unlock at same time
+    'Neon Mixtape Tour Key':[W.eighties],
+    'Jurassic Marsh Key':   [W.dino],
+    'Modern Day Key':       [W.modern],
+  };
 
   // Auto-generated from level_rewards.csv
   const LOC_LEVELS = {
-
-    // ALOE
-    'aloe0':['aloe0.JSON'],
-    'aloe1':['aloe1.JSON'],
-    'aloe2':['aloe2.JSON'],
-    'aloe3':['aloe3.JSON'],
-    'aloe4':['aloe4.JSON'],
-    'Aloe Unlock':['aloe5.JSON'],
-
-    // APPEASE
-    'appease1_0':['appease1_0'],
-    'appease1_1':['appease1_1'],
-    'appease1_2':['appease1_2'],
-    'Dandelion Unlock':['appease1_3'],
-    'appease1_4':['appease1_4'],
-    'appease1_5':['appease1_5'],
-    'Pvine Unlock':['appease1_6'],
-    'appease2_0':['appease2_0'],
-    'appease2_1':['appease2_1'],
-    'appease2_2':['appease2_2'],
-    'appease2_3':['appease2_3'],
-    'Gatling Unlock':['appease2_4'],
-    'Megagatling Unlock':['appease2_5'],
-    'Torchwood Unlock':['appease2_6'],
-
-    // ATOMBOMB
-    'atombomb0':['atombomb0'],
-    'atombomb1':['atombomb1'],
-    'atombomb2':['atombomb2'],
-    'atombomb3':['atombomb3'],
-    'atombomb4':['atombomb4'],
-    'Atombomb Seedling Unlock':['atombomb5'],
-
-    // BANK
-    'bank_theft1':['bank_theft1'],
-    'bank_theft2':['bank_theft2'],
-    'bank_theft3':['bank_theft3'],
-    'bank_theft4':['bank_theft4'],
-    'bank_theft5':['bank_theft5'],
-
-    // BEACH
-    'Lilypad Unlock':['beach1'],
-    'beach2':['beach2'],
-    'beach3':['beach3'],
-    'Branch Unlock Beach 4':['beach4'],
-    'beach5':['beach5'],
-    'Tanglekelp Unlock':['beach6'],
-    'beach7':['beach7'],
-    'Branch Unlock Beach 8':['beach8'],
-    'beach9':['beach9'],
-    'beach10':['beach10'],
-    'Bowlingbulb Unlock':['beach11'],
-    'Branch Unlock Beach 12':['beach12'],
-    'beach13':['beach13'],
-    'Branch Unlock Beach 14':['beach14'],
-    'Note Beach Unlock':['beach15'],
-    'World Key':['beach16'],
-    'Branch Unlock Beach 17':['beach17'],
-    'beach18':['beach18'],
-    'Guacodile Unlock':['beach19'],
-    'Dangerroom Beach Unlock':['beach20'],
-    'beach21':['beach21'],
-    'Branch Unlock Beach 22':['beach22'],
-    'beach23':['beach23'],
-    'Dangerroom Beach Minigame Unlock':['beach24'],
-    'Branch Unlock Beach 25':['beach25'],
-    'beach26':['beach26'],
-    'Banana Unlock':['beach27'],
-    'beach28':['beach28'],
-    'beach29':['beach29'],
-    'Branch Unlock Beach 30':['beach30'],
-    'Seashroom Unlock':['beach31'],
-    'Worldtrophy Beach Unlock':['beach32'],
-    'beach33':['beach33'],
-    'beach34':['beach34'],
-    'beach35':['beach35'],
-    'Dangerroom Beach2 Unlock':['beach36'],
-    'beach37':['beach37'],
-    'beach38':['beach38'],
-    'beach39':['beach39'],
-    'beach40':['beach40'],
-    'beach41':['beach41'],
-    'beach42':['beach42'],
-    'beach_dangerroom':['beach_dangerroom'],
-    'beach_dangerroom2':['beach_dangerroom2'],
-    'beach_dangerroom_minigame_beach':['beach_dangerroom_minigame_beach'],
-    'beach_dangerroom_minigame_cowboy':['beach_dangerroom_minigame_cowboy'],
-    'beach_dangerroom_minigame_dark':['beach_dangerroom_minigame_dark'],
-    'beach_dangerroom_minigame_egypt':['beach_dangerroom_minigame_egypt'],
-    'beach_dangerroom_minigame_future':['beach_dangerroom_minigame_future'],
-    'beach_dangerroom_minigame_iceage':['beach_dangerroom_minigame_iceage'],
-    'beach_dangerroom_minigame_lostcity':['beach_dangerroom_minigame_lostcity'],
-    'beach_dangerroom_minigame_pirate':['beach_dangerroom_minigame_pirate'],
-
-    // BLOOMINGHEARTS
-    'bloominghearts0':['bloominghearts0'],
-    'bloominghearts1':['bloominghearts1'],
-    'bloominghearts2':['bloominghearts2'],
-    'bloominghearts3':['bloominghearts3'],
-    'bloominghearts4':['bloominghearts4'],
-    'Bloominghearts Unlock':['bloominghearts5'],
-
-    // BUTTERCUP
-    'buttercup0':['buttercup0'],
-    'buttercup1':['buttercup1'],
-    'buttercup2':['buttercup2'],
-    'buttercup3':['buttercup3'],
-    'buttercup4':['buttercup4'],
-    'Buttercup Unlock':['buttercup5'],
-
-    // CONCEAL
-    'conceal0':['conceal0'],
-    'conceal1':['conceal1'],
-    'conceal2':['conceal2'],
-    'conceal3':['conceal3'],
-    'conceal4':['conceal4'],
-    'Gloomvine Unlock':['conceal5'],
-    'conceal6':['conceal6'],
-    'Murkadamia Unlock':['conceal7'],
-    'conceal8':['conceal8'],
-    'Shadowpeashooter Unlock':['conceal9'],
-    'conceal10':['conceal10'],
-    'Noctarine Unlock':['conceal11'],
-
-    // COWBOY
-    'Splitpea Unlock':['cowboy1'],
-    'Branch Unlock Cowboy 2':['cowboy2'],
-    'Dangerroom Cowboy Unlock':['cowboy3'],
-    'Chilibean Unlock':['cowboy4'],
-    'cowboy5':['cowboy5'],
-    'Peapod Unlock':['cowboy6'],
-    'Note Cowboy Unlock':['cowboy7'],
-    'World Key':['cowboy8'],
-    'Lightningreed Unlock':['cowboy9'],
-    'cowboy10':['cowboy10'],
-    'Upgrade Sunshovel Lvl2 Unlock':['cowboy11'],
-    'Melonpult Unlock':['cowboy12'],
-    'cowboy12_1':['cowboy12_1'],
-    'cowboy13':['cowboy13'],
-    'Branch Unlock Cowboy 14':['cowboy14'],
-    'Upgrade Wallnut Firstaid Unlock':['cowboy15'],
-    'cowboy16':['cowboy16'],
-    'Branch Unlock Cowboy 17':['cowboy17'],
-    'Tallnut Unlock':['cowboy18'],
-    'cowboy18_1':['cowboy18_1'],
-    'cowboy19':['cowboy19'],
-    'Upgrade Pf Refresh Unlock':['cowboy20'],
-    'cowboy21':['cowboy21'],
-    'Branch Unlock Cowboy 22':['cowboy22'],
-    'cowboy22_1':['cowboy22_1'],
-    'cowboy23':['cowboy23'],
-    'cowboy23_1':['cowboy23_1'],
-    'Wintermelon Unlock':['cowboy24'],
-    'cowboy24_1':['cowboy24_1'],
-    'Worldtrophy Cowboy Unlock':['cowboy25'],
-    'Branch Unlock Cowboy 26':['cowboy26'],
-    'cowboy27':['cowboy27'],
-    'cowboy28':['cowboy28'],
-    'cowboy29':['cowboy29'],
-    'Branch Unlock Cowboy 30':['cowboy30'],
-    'cowboy31':['cowboy31'],
-    'cowboy32':['cowboy32'],
-    'Dangerroom Cowboy2 Unlock':['cowboy33'],
-    'Branch Unlock Cowboy 34':['cowboy34'],
-    'cowboy35':['cowboy35'],
-    'cowboy_dangerroom':['cowboy_dangerroom'],
-    'cowboy_dangerroom2':['cowboy_dangerroom2'],
-    'random_zomboss_cowboy':['random_zomboss_cowboy'],
-
-    // DARK
-    'Sunshroom Unlock':['dark1'],
-    'Puffshroom Unlock':['dark2'],
-    'dark3':['dark3'],
-    'Fumeshroom Unlock':['dark4'],
-    'dark5':['dark5'],
-    'Sunbean Unlock':['dark6'],
-    'dark7':['dark7'],
-    'Branch Unlock Dark 8':['dark8'],
-    'Note Dark Unlock':['dark9'],
-    'World Key':['dark10'],
-    'Branch Unlock Dark 11':['dark11'],
-    'Dangerroom Dark Unlock':['dark12'],
-    'Branch Unlock Dark 13':['dark13'],
-    'dark14':['dark14'],
-    'Magnetshroom Unlock':['dark15'],
-    'dark16':['dark16'],
-    'dark17':['dark17'],
-    'Branch Unlock Dark 18':['dark18'],
-    'dark18_1':['dark18_1'],
-    'dark19':['dark19'],
-    'Worldtrophy Dark Unlock':['dark20'],
-    'Scaredyshroom Unlock':['dark21'],
-    'dark22':['dark22'],
-    'Branch Unlock Dark 23':['dark23'],
-    'Branch Unlock Dark 24':['dark24'],
-    'Branch Unlock Dark 25':['dark25'],
-    'Dangerroom Dark2 Unlock':['dark26'],
-    'Dangerroom Dark Potion Unlock':['dark27'],
-    'dark28':['dark28'],
-    'Branch Unlock Dark 29':['dark29'],
-    'dark30':['dark30'],
-    'dark_dangerroom':['dark_dangerroom'],
-    'dark_dangerroom2':['dark_dangerroom2'],
-    'dark_dangerroom_potion':['dark_dangerroom_potion'],
-    'random_zomboss_dark':['random_zomboss_dark'],
-
-    // DINO
-    'Primalpeashooter Unlock':['dino1'],
-    'dino2':['dino2'],
-    'dino3':['dino3'],
-    'Primalwallnut Unlock':['dino4'],
-    'dino5':['dino5'],
-    'Branch Unlock Dino 6':['dino6'],
-    'Branch Unlock Dino 7':['dino7'],
-    'Perfumeshroom Unlock':['dino8'],
-    'dino9':['dino9'],
-    'dino10':['dino10'],
-    'dino11':['dino11'],
-    'Branch Unlock Dino 12':['dino12'],
-    'dino13':['dino13'],
-    'Branch Unlock Dino 14':['dino14'],
-    'Note Dino Unlock':['dino15'],
-    'World Key':['dino16'],
-    'Primalsunflower Unlock':['dino17'],
-    'dino18':['dino18'],
-    'dino19':['dino19'],
-    'Dangerroom Dino Unlock':['dino20'],
-    'dino21':['dino21'],
-    'dino22':['dino22'],
-    'Primalpotatomine Unlock':['dino23'],
-    'Branch Unlock Dino 24':['dino24'],
-    'dino25':['dino25'],
-    'dino26':['dino26'],
-    'dino27':['dino27'],
-    'dino28':['dino28'],
-    'Branch Unlock Dino 29':['dino29'],
-    'dino30':['dino30'],
-    'dino31':['dino31'],
-    'Worldtrophy Dino Unlock':['dino32'],
-    'Branch Unlock Dino 33':['dino33'],
-    'dino34':['dino34'],
-    'dino35':['dino35'],
-    'Dangerroom Dino2 Unlock':['dino36'],
-    'Branch Unlock Dino 37':['dino37'],
-    'dino38':['dino38'],
-    'dino39':['dino39'],
-    'dino40':['dino40'],
-    'Branch Unlock Dino 41':['dino41'],
-    'dino42':['dino42'],
-    'dino_dangerroom':['dino_dangerroom'],
-    'dino_dangerroom2':['dino_dangerroom2'],
-
-    // DOOMSHROOM
-    'doomshroom0':['doomshroom0'],
-    'doomshroom1':['doomshroom1'],
-    'doomshroom2':['doomshroom2'],
-    'doomshroom3':['doomshroom3'],
-    'doomshroom4':['doomshroom4'],
-    'Doomshroom Unlock':['doomshroom5'],
-
-    // EGYPT
-    'Map Unlock':['egypt1'],
-    'Cabbagepult Unlock':['egypt2'],
-    'Bloomerang Unlock':['egypt3'],
-    'Powerupgadget Unlock':['egypt4'],
-    'Iceburg Unlock':['egypt5'],
-    'Branch Unlock Egypt 6':['egypt6'],
-    'Note Egypt Unlock':['egypt7'],
-    'World Key':['egypt8'],
-    'Gravebuster Unlock':['egypt9'],
-    'egypt10':['egypt10'],
-    'Branch Unlock Egypt 11':['egypt11'],
-    'Dangerroom Egypt Unlock':['egypt12'],
-    'Bonkchoy Unlock':['egypt13'],
-    'egypt14':['egypt14'],
-    'Branch Unlock Egypt 15':['egypt15'],
-    'egypt16':['egypt16'],
-    'Upgrade Pf Slots Lvl1 Unlock':['egypt17'],
-    'egypt18':['egypt18'],
-    'Repeater Unlock':['egypt19'],
-    'egypt20':['egypt20'],
-    'egypt20_1':['egypt20_1'],
-    'Upgrade Starting Sun Lvl1 Unlock':['egypt21'],
-    'egypt21_1':['egypt21_1'],
-    'Branch Unlock Egypt 22':['egypt22'],
-    'egypt22_1':['egypt22_1'],
-    'Dangerroom Egypt Minigame Unlock':['egypt23'],
-    'Twinsunflower Unlock':['egypt24'],
-    'egypt24_1':['egypt24_1'],
-    'Worldtrophy Egypt Unlock':['egypt25'],
-    'egypt26':['egypt26'],
-    'Branch Unlock Egypt 27':['egypt27'],
-    'egypt28':['egypt28'],
-    'egypt29':['egypt29'],
-    'Branch Unlock Egypt 30':['egypt30'],
-    'Dangerroom Egypt2 Unlock':['egypt31'],
-    'egypt32':['egypt32'],
-    'egypt33':['egypt33'],
-    'Branch Unlock Egypt 34':['egypt34'],
-    'egypt35':['egypt35'],
-    'egypt_dangerroom':['egypt_dangerroom'],
-    'egypt_dangerroom2':['egypt_dangerroom2'],
-    'egypt_dangerroom_minigame':['egypt_dangerroom_minigame'],
-    'random_zomboss_egypt':['random_zomboss_egypt'],
-
-    // EIGHTIES
-    'Phatbeet Unlock':['eighties1'],
-    'eighties2':['eighties2'],
-    'eighties3':['eighties3'],
-    'eighties4':['eighties4'],
-    'Celerystalker Unlock':['eighties5'],
-    'eighties6':['eighties6'],
-    'eighties7':['eighties7'],
-    'eighties8':['eighties8'],
-    'Thymewarp Unlock':['eighties9'],
-    'eighties10':['eighties10'],
-    'eighties11':['eighties11'],
-    'Branch Unlock Eighties 12':['eighties12'],
-    'eighties13':['eighties13'],
-    'Branch Unlock Eighties 14':['eighties14'],
-    'eighties15':['eighties15'],
-    'World Key':['eighties16'],
-    'Garlic Unlock':['eighties17'],
-    'eighties18':['eighties18'],
-    'eighties19':['eighties19'],
-    'Dangerroom Eighties Unlock':['eighties20'],
-    'Sporeshroom Unlock':['eighties21'],
-    'eighties22':['eighties22'],
-    'eighties23':['eighties23'],
-    'Branch Unlock Eighties 24':['eighties24'],
-    'eighties25':['eighties25'],
-    'Intensivecarrot Unlock':['eighties26'],
-    'eighties27':['eighties27'],
-    'eighties28':['eighties28'],
-    'Branch Unlock Eighties 29':['eighties29'],
-    'eighties30':['eighties30'],
-    'eighties31':['eighties31'],
-    'Worldtrophy Eighties Unlock':['eighties32'],
-    'eighties_dangerroom':['eighties_dangerroom'],
-
-    // ELECTRICCURRANT
-    'electriccurrant0':['electriccurrant0'],
-    'electriccurrant1':['electriccurrant1'],
-    'electriccurrant2':['electriccurrant2'],
-    'electriccurrant3':['electriccurrant3'],
-    'electriccurrant4':['electriccurrant4'],
-    'Electriccurrant Unlock':['electriccurrant5'],
-
-    // ENLIGHTEN
-    'enlighten0':['enlighten0'],
-    'enlighten1':['enlighten1'],
-    'enlighten2':['enlighten2'],
-    'enlighten3':['enlighten3'],
-    'enlighten4':['enlighten4'],
-    'enlighten5':['enlighten5'],
-    'enlighten6':['enlighten6'],
-    'Shinevine Unlock':['enlighten7'],
-
-    // EPIC
-    'epic_beghouled1':['epic_beghouled1'],
-    'epic_beghouled2':['epic_beghouled2'],
-    'epic_beghouled3':['epic_beghouled3'],
-    'epic_beghouled4':['epic_beghouled4'],
-    'epic_beghouled5':['epic_beghouled5'],
-
-    // FLOAWERPOT
-    'floawerpot1':['floawerpot1'],
-    'floawerpot2':['floawerpot2'],
-    'floawerpot3':['floawerpot3'],
-
-    // FUTURE
-    'Laser Bean Unlock':['future1'],
-    'future2':['future2'],
-    'Blover Unlock':['future3'],
-    'Dangerroom Future Unlock':['future4'],
-    'Branch Unlock Future 5':['future5'],
-    'Citron Unlock':['future6'],
-    'Note Future Unlock':['future7'],
-    'World Key':['future8'],
-    'Empea Unlock':['future9'],
-    'future10':['future10'],
-    'future10_1':['future10_1'],
-    'future10_2':['future10_2'],
-    'future10_3':['future10_3'],
-    'future10_4':['future10_4'],
-    'Branch Unlock Future 11':['future11'],
-    'future12':['future12'],
-    'Holonut Unlock':['future13'],
-    'future14':['future14'],
-    'Branch Unlock Future 15':['future15'],
-    'future16':['future16'],
-    'Magnifyinggrass Unlock':['future17'],
-    'future18':['future18'],
-    'future19':['future19'],
-    'Upgrade Manual Mowers 1 Unlock':['future20'],
-    'future21':['future21'],
-    'Branch Unlock Future 22':['future22'],
-    'future23':['future23'],
-    'Powerplant Unlock':['future24'],
-    'Worldtrophy Future Unlock':['future25'],
-    'future26':['future26'],
-    'Branch Unlock Future 27':['future27'],
-    'future28':['future28'],
-    'future29':['future29'],
-    'Branch Unlock Future 30':['future30'],
-    'future31':['future31'],
-    'Dangerroom Future2 Unlock':['future32'],
-    'Dangerroom Future Sunbomb Unlock':['future33'],
-    'Branch Unlock Future 34':['future34'],
-    'future35':['future35'],
-    'future_dangerroom':['future_dangerroom'],
-    'future_dangerroom2':['future_dangerroom2'],
-    'future_dangerroom_sunbomb':['future_dangerroom_sunbomb'],
-    'random_zomboss_future':['random_zomboss_future'],
-
-    // GHOSTPEPPER
-    'ghostpepper0':['ghostpepper0'],
-    'ghostpepper1':['ghostpepper1'],
-    'ghostpepper2':['ghostpepper2'],
-    'Ghostpepper Unlock':['ghostpepper3'],
-
-    // GLOOMSHROOM
-    'gloomshroom0':['gloomshroom0'],
-    'gloomshroom1':['gloomshroom1'],
-    'gloomshroom2':['gloomshroom2'],
-    'gloomshroom3':['gloomshroom3'],
-    'gloomshroom4':['gloomshroom4'],
-    'gloomshroom5':['gloomshroom5'],
-    'gloomshroom6':['gloomshroom6'],
-    'Gloomshroom Unlock':['gloomshroom7'],
-
-    // GOLDBLOOM
-    'goldbloom0':['goldbloom0'],
-    'goldbloom1':['goldbloom1'],
-    'goldbloom2':['goldbloom2'],
-    'Goldbloom Unlock':['goldbloom3'],
-
-    // HOTDATE
-    'hotdate1':['hotdate1'],
-    'hotdate2':['hotdate2'],
-    'Hotdate Unlock':['hotdate3'],
-
-    // ICEAGE
-    'Hotpotato Unlock':['iceage1'],
-    'iceage2':['iceage2'],
-    'iceage3':['iceage3'],
-    'Branch Unlock Iceage 4':['iceage4'],
-    'iceage5':['iceage5'],
-    'Pepperpult Unlock':['iceage6'],
-    'iceage7':['iceage7'],
-    'Branch Unlock Iceage 8':['iceage8'],
-    'iceage9':['iceage9'],
-    'iceage10':['iceage10'],
-    'Chardguard Unlock':['iceage11'],
-    'Branch Unlock Iceage 12':['iceage12'],
-    'iceage13':['iceage13'],
-    'Branch Unlock Iceage 14':['iceage14'],
-    'Note Iceage Unlock':['iceage15'],
-    'World Key':['iceage16'],
-    'Branch Unlock Iceage 17':['iceage17'],
-    'iceage18':['iceage18'],
-    'Stunion Unlock':['iceage19'],
-    'Dangerroom Iceage Unlock':['iceage20'],
-    'iceage21':['iceage21'],
-    'Branch Unlock Iceage 22':['iceage22'],
-    'iceage23':['iceage23'],
-    'Branch Unlock Iceage 24':['iceage24'],
-    'iceage24_B':['iceage24_B'],
-    'iceage25':['iceage25'],
-    'Xshot Unlock':['iceage26'],
-    'iceage27':['iceage27'],
-    'iceage28':['iceage28'],
-    'Branch Unlock Iceage 29':['iceage29'],
-    'Worldtrophy Iceage Unlock':['iceage30'],
-    'Branch Unlock Iceage 31':['iceage31'],
-    'iceage32':['iceage32'],
-    'iceage33':['iceage33'],
-    'Branch Unlock Iceage 34':['iceage34'],
-    'Dangerroom Iceage2 Unlock':['iceage35'],
-    'iceage36':['iceage36'],
-    'iceage37':['iceage37'],
-    'iceage38':['iceage38'],
-    'iceage39':['iceage39'],
-    'iceage40':['iceage40'],
-    'iceage_dangerroom':['iceage_dangerroom'],
-    'iceage_dangerroom2':['iceage_dangerroom2'],
-
-    // ICEBLOOM
-    'icebloom0':['icebloom0'],
-    'icebloom1':['icebloom1'],
-    'icebloom2':['icebloom2'],
-    'icebloom3':['icebloom3'],
-    'icebloom4':['icebloom4'],
-    'Icebloom Unlock':['icebloom5'],
-
-    // ICESHROOM
-    'iceshroom0':['iceshroom0'],
-    'iceshroom1':['iceshroom1'],
-    'iceshroom2':['iceshroom2'],
-    'iceshroom3':['iceshroom3'],
-    'iceshroom4':['iceshroom4'],
-    'Glaciershroom Unlock':['iceshroom5'],
-
-    // KONGFU
-    'Firegourd Unlock':['kongfu1'],
-    'kongfu2':['kongfu2'],
-    'kongfu3':['kongfu3'],
-    'kongfu4':['kongfu4'],
-    'kongfu5':['kongfu5'],
-    'Snowpea Unlock':['kongfu6'],
-    'kongfu7':['kongfu7'],
-    'World Key':['kongfu8'],
-    'kongfu9':['kongfu9'],
-    'Bambooshoot Unlock':['kongfu10'],
-    'kongfu11':['kongfu11'],
-    'kongfu12':['kongfu12'],
-    'Turnip Unlock':['kongfu13'],
-    'Dangerroom Kongfu Unlock':['kongfu14'],
-    'kongfu15':['kongfu15'],
-    'kongfu16':['kongfu16'],
-    'kongfu17':['kongfu17'],
-    'kongfu18':['kongfu18'],
-    'Peach Unlock':['kongfu19'],
-    'kongfu20':['kongfu20'],
-    'kongfu21':['kongfu21'],
-    'kongfu22':['kongfu22'],
-    'kongfu23':['kongfu23'],
-    'kongfu24':['kongfu24'],
-    'kongfu25':['kongfu25'],
-    'kongfu26':['kongfu26'],
-    'kongfu27':['kongfu27'],
-    'kongfu28':['kongfu28'],
-    'Lychee Unlock':['kongfu29'],
-    'Dangerroom Kongfu2 Unlock':['kongfu30'],
-    'kongfu31':['kongfu31'],
-    'kongfu32':['kongfu32'],
-    'kongfu33':['kongfu33'],
-    'Solarsage Unlock':['kongfu34'],
-    'kongfu35':['kongfu35'],
-    'kongfu36':['kongfu36'],
-    'kongfu37':['kongfu37'],
-    'kongfu38':['kongfu38'],
-    'kongfu39':['kongfu39'],
-    'kongfu40':['kongfu40'],
-    'kongfu41':['kongfu41'],
-    'kongfu42':['kongfu42'],
-    'kongfu43':['kongfu43'],
-    'kongfu44':['kongfu44'],
-    'kongfu45':['kongfu45'],
-    'Cantaloupe Unlock':['kongfu46'],
-    'Dangerroom Kongfu3 Unlock':['kongfu47'],
-    'kongfu48':['kongfu48'],
-    'kongfu_dangerroom':['kongfu_dangerroom'],
-    'kongfu_dangerroom2':['kongfu_dangerroom2'],
-    'kongfu_dangerroom3':['kongfu_dangerroom3'],
-    'kongfu_dangerroom4':['kongfu_dangerroom4'],
-
-    // LOSTCITY
-    'Redstinger Unlock':['lostcity1'],
-    'lostcity2':['lostcity2'],
-    'lostcity3':['lostcity3'],
-    'Branch Unlock Lostcity 4':['lostcity4'],
-    'lostcity5':['lostcity5'],
-    'Akee Unlock':['lostcity6'],
-    'lostcity7':['lostcity7'],
-    'Branch Unlock Lostcity 8':['lostcity8'],
-    'lostcity9':['lostcity9'],
-    'Endurian Unlock':['lostcity10'],
-    'lostcity11':['lostcity11'],
-    'Branch Unlock Lostcity 12':['lostcity12'],
-    'lostcity13':['lostcity13'],
-    'Branch Unlock Lostcity 14':['lostcity14'],
-    'Note Lostcity Unlock':['lostcity15'],
-    'World Key':['lostcity16'],
-    'Branch Unlock Lostcity 17':['lostcity17'],
-    'lostcity18':['lostcity18'],
-    'Stallia Unlock':['lostcity19'],
-    'Dangerroom Lostcity Unlock':['lostcity20'],
-    'lostcity21':['lostcity21'],
-    'lostcity22':['lostcity22'],
-    'Branch Unlock Lostcity 23':['lostcity23'],
-    'lostcity24':['lostcity24'],
-    'lostcity25':['lostcity25'],
-    'Goldleaf Unlock':['lostcity26'],
-    'lostcity27':['lostcity27'],
-    'Branch Unlock Lostcity 28':['lostcity28'],
-    'lostcity29':['lostcity29'],
-    'Branch Unlock Lostcity 30':['lostcity30'],
-    'lostcity31':['lostcity31'],
-    'Worldtrophy Lostcity Unlock':['lostcity32'],
-    'Branch Unlock Lostcity 33':['lostcity33'],
-    'Branch Unlock Lostcity 34':['lostcity34'],
-    'Branch Unlock Lostcity 35':['lostcity35'],
-    'Branch Unlock Lostcity 36':['lostcity36'],
-    'lostcity37':['lostcity37'],
-    'Branch Unlock Lostcity 38':['lostcity38'],
-    'Dangerroom Lostcity2 Unlock':['lostcity39'],
-    'Branch Unlock Lostcity 40':['lostcity40'],
-    'Branch Unlock Lostcity 41':['lostcity41'],
-    'lostcity42':['lostcity42'],
-    'lostcity_dangerroom':['lostcity_dangerroom'],
-    'lostcity_dangerroom2':['lostcity_dangerroom2'],
-
-    // METEORFLOWER
-    'meteorflower0':['meteorflower0'],
-    'meteorflower1':['meteorflower1'],
-    'meteorflower2':['meteorflower2'],
-    'Meteorflower Unlock':['meteorflower3'],
-
-    // MIXED
-    'mixed_dangerroom2':['mixed_dangerroom2'],
-
-    // MODERN
-    'Moonflower Unlock':['modern1'],
-    'modern2':['modern2'],
-    'modern3':['modern3'],
-    'Nightshade Unlock':['modern4'],
-    'modern5':['modern5'],
-    'Branch Unlock Modern 6':['modern6'],
-    'Branch Unlock Modern 7':['modern7'],
-    'modern8':['modern8'],
-    'modern9':['modern9'],
-    'Shadowshroom Unlock':['modern10'],
-    'modern11':['modern11'],
-    'Branch Unlock Modern 12':['modern12'],
-    'modern13':['modern13'],
-    'Branch Unlock Modern 14':['modern14'],
-    'Note Modern Unlock':['modern15'],
-    'World Key':['modern16'],
-    'Dusklobber Unlock':['modern17'],
-    'modern18':['modern18'],
-    'modern19':['modern19'],
-    'Dangerroom Modern Unlock':['modern20'],
-    'modern21':['modern21'],
-    'modern22':['modern22'],
-    'Grimrose Unlock':['modern23'],
-    'modern24':['modern24'],
-    'Branch Unlock Modern 25':['modern25'],
-    'modern26':['modern26'],
-    'modern27':['modern27'],
-    'modern28':['modern28'],
-    'Branch Unlock Modern 29':['modern29'],
-    'modern30':['modern30'],
-    'modern31':['modern31'],
-    'modern35':['modern35'],
-    'Branch Unlock Modern 36':['modern36'],
-    'modern37':['modern37'],
-    'modern38':['modern38'],
-    'Branch Unlock Modern 39':['modern39'],
-    'Dangerroom Modern2 Unlock':['modern40'],
-    'modern41':['modern41'],
-    'modern42':['modern42'],
-    'Branch Unlock Modern 43':['modern43'],
-    'modern44':['modern44'],
-    'modern_dangerroom':['modern_dangerroom'],
-    'modern_dangerroom2':['modern_dangerroom2'],
-    'modern_zomboss_01_egypt':['modern_zomboss_01_egypt'],
-    'modern_zomboss_02_pirate':['modern_zomboss_02_pirate'],
-    'modern_zomboss_03_cowboy':['modern_zomboss_03_cowboy'],
-    'modern_zomboss_04_future':['modern_zomboss_04_future'],
-    'modern_zomboss_05_dark':['modern_zomboss_05_dark'],
-    'modern_zomboss_06_beach':['modern_zomboss_06_beach'],
-    'Worldtrophy Modern Unlock':['modern_zomboss_07_iceage'],
-    'Worldtrophy Modern Unlock':['modern_zomboss_08_lostcity'],
-    'Worldtrophy Modern Unlock':['modern_zomboss_09_eighties'],
-    'Worldtrophy Modern Unlock':['modern_zomboss_10_dino'],
-
-    // PARSNIP
-    'parsnip0':['parsnip0'],
-    'parsnip1':['parsnip1'],
-    'parsnip2':['parsnip2'],
-    'parsnip3':['parsnip3'],
-    'parsnip4':['parsnip4'],
-    'Parsnip Unlock':['parsnip5'],
-
-    // PIRATE
-    'Kernelpult Unlock':['pirate1'],
-    'pirate2':['pirate2'],
-    'Snapdragon Unlock':['pirate3'],
-    'Dangerroom Pirate Unlock':['pirate4'],
-    'Branch Unlock Pirate 5':['pirate5'],
-    'Spikeweed Unlock':['pirate6'],
-    'Note Pirate Unlock':['pirate7'],
-    'World Key':['pirate8'],
-    'Springbean Unlock':['pirate9'],
-    'pirate10':['pirate10'],
-    'Coconutcannon Unlock':['pirate11'],
-    'Upgrade Sunshovel Lvl1 Unlock':['pirate12'],
-    'pirate13':['pirate13'],
-    'Threepeater Unlock':['pirate14'],
-    'pirate15':['pirate15'],
-    'Branch Unlock Pirate 16':['pirate16'],
-    'pirate17':['pirate17'],
-    'Spikerock Unlock':['pirate18'],
-    'pirate18_1':['pirate18_1'],
-    'Branch Unlock Pirate 19':['pirate19'],
-    'None Unlock':['pirate20'],
-    'None Unlock':['pirate20_1'],
-    'Upgrade 7 Slots Unlock':['pirate21'],
-    'pirate22':['pirate22'],
-    'pirate22_1':['pirate22_1'],
-    'Branch Unlock Pirate 23':['pirate23'],
-    'pirate23_1':['pirate23_1'],
-    'Cherry Bomb Unlock':['pirate24'],
-    'pirate24_1':['pirate24_1'],
-    'Worldtrophy Pirate Unlock':['pirate25'],
-    'pirate26':['pirate26'],
-    'Branch Unlock Pirate 27':['pirate27'],
-    'pirate28':['pirate28'],
-    'pirate29':['pirate29'],
-    'Branch Unlock Pirate 30':['pirate30'],
-    'pirate31':['pirate31'],
-    'pirate32':['pirate32'],
-    'Dangerroom Pirate2 Unlock':['pirate33'],
-    'pirate34':['pirate34'],
-    'pirate35':['pirate35'],
-    'pirate_dangerroom':['pirate_dangerroom'],
-    'pirate_dangerroom2':['pirate_dangerroom2'],
-    'random_zomboss_pirate':['random_zomboss_pirate'],
-
-    // PLANTERN
-    'plantern0':['plantern0'],
-    'plantern1':['plantern1'],
-    'plantern2':['plantern2'],
-    'plantern3':['plantern3'],
-    'plantern4':['plantern4'],
-    'Plantern Unlock':['plantern5'],
-
-    // RANDOM
-    'random_beach':['random_beach'],
-    'random_cowboy':['random_cowboy'],
-    'random_dark':['random_dark'],
-    'random_egypt':['random_egypt'],
-    'random_future':['random_future'],
-    'random_pirate':['random_pirate'],
-
-    // REINFORCE
-    'reinforce0':['reinforce0'],
-    'reinforce1':['reinforce1'],
-    'reinforce2':['reinforce2'],
-    'reinforce3':['reinforce3'],
-    'reinforce4':['reinforce4'],
-    'reinforce5':['reinforce5'],
-    'reinforce6':['reinforce6'],
-    'Pumpkin Unlock':['reinforce7'],
-    'reinforce8':['reinforce8'],
-    'Hollyknight Unlock':['reinforce9'],
-    'reinforce10':['reinforce10'],
-    'Gumnut Unlock':['reinforce11'],
-
-    // REINFORCEMINT
-    'reinforcemint_try1':['reinforcemint_try1'],
-    'reinforcemint_try2':['reinforcemint_try2'],
-    'reinforcemint_try3':['reinforcemint_try3'],
-
-    // RHYTHM
-    'rhythm1':['rhythm1'],
-
-    // SANDBOX
-    'sandbox':['sandbox'],
-    'sandbox_green':['sandbox_green'],
-    'sandbox_modern':['sandbox_modern'],
-    'sandbox_modern_night':['sandbox_modern_night'],
-    'sandbox_sky':['sandbox_sky'],
-
-    // SAPFLING
-    'sapfling0':['sapfling0'],
-    'sapfling1':['sapfling1'],
-    'sapfling2':['sapfling2'],
-    'sapfling3':['sapfling3'],
-    'sapfling4':['sapfling4'],
-    'sapfling5':['sapfling5'],
-    'sapfling6':['sapfling6'],
-    'Sapfling Unlock':['sapfling7'],
-
-    // SEASHOOTER
-    'seashooter0':['seashooter0'],
-    'seashooter1':['seashooter1'],
-    'seashooter2':['seashooter2'],
-    'Seashooter Unlock':['seashooter3'],
-
-    // SHOOTINGSTARFRUIT
-    'shootingstarfruit1':['shootingstarfruit1'],
-    'shootingstarfruit2':['shootingstarfruit2'],
-    'shootingstarfruit3':['shootingstarfruit3'],
-
-    // SKY
-    'Skyshooter Unlock':['sky1'],
-    'sky2':['sky2'],
-    'Upgrade Sky Shield Unlock':['sky3'],
-    'sky4':['sky4'],
-    'sky5':['sky5'],
-    'Pineapple Unlock':['sky6'],
-    'sky7':['sky7'],
-    'Moonbean Unlock':['sky8'],
-    'sky9':['sky9'],
-    'sky10':['sky10'],
-    'Anthurium Unlock':['sky11'],
-    'sky12':['sky12'],
-    'sky13':['sky13'],
-    'sky14':['sky14'],
-    'sky15':['sky15'],
-    'World Key':['sky16'],
-
-    // SOLARTOMATO
-    'solartomato0':['solartomato0'],
-    'solartomato1':['solartomato1'],
-    'solartomato2':['solartomato2'],
-    'solartomato3':['solartomato3'],
-    'solartomato4':['solartomato4'],
-    'Solartomato Unlock':['solartomato5'],
-
-    // SQUASH
-    'squash0':['squash0'],
-    'squash1':['squash1'],
-    'squash2':['squash2'],
-    'Squash Unlock':['squash3'],
-
-    // STRAWBURST
-    'strawburst0':['strawburst0'],
-    'strawburst1':['strawburst1'],
-    'strawburst2':['strawburst2'],
-    'strawburst3':['strawburst3'],
-    'strawburst4':['strawburst4'],
-    'strawburst5':['strawburst5'],
-    'strawburst6':['strawburst6'],
-    'Strawburst Unlock':['strawburst7'],
-
-    // SWEETPOTATO
-    'sweetpotato0':['sweetpotato0'],
-    'sweetpotato1':['sweetpotato1'],
-    'sweetpotato2':['sweetpotato2'],
-    'sweetpotato3':['sweetpotato3'],
-    'sweetpotato4':['sweetpotato4'],
-    'Sweetpotato Unlock':['sweetpotato5'],
-
-    // TUTORIAL
-    'Sunflower Unlock':['tutorial1'],
-    'Wall-nut Unlock':['tutorial2'],
-    'Potatomine Unlock':['tutorial3'],
-    'Sauce Unlock':['tutorial4'],
-
-    // UMBRELLALEAF
-    'umbrellaleaf0':['umbrellaleaf0'],
-    'umbrellaleaf1':['umbrellaleaf1'],
-    'umbrellaleaf2':['umbrellaleaf2'],
-    'umbrellaleaf3':['umbrellaleaf3'],
-    'umbrellaleaf4':['umbrellaleaf4'],
-    'umbrellaleaf5':['umbrellaleaf5'],
-    'umbrellaleaf6':['umbrellaleaf6'],
-    'umbrellaleaf7':['umbrellaleaf7'],
-    'umbrellaleaf8':['umbrellaleaf8'],
-    'umbrellaleaf9':['umbrellaleaf9'],
-    'umbrellaleaf10':['umbrellaleaf10'],
-    'Umbrellaleaf Unlock':['umbrellaleaf11'],
-
-    // VAMPORCINI
-    'vamporcini0':['vamporcini0'],
-    'vamporcini1':['vamporcini1'],
-    'vamporcini2':['vamporcini2'],
-    'Vamporcini Unlock':['vamporcini3'],
+    'Sunflower Unlock':'tutorial1',
+    'Wall-nut Unlock':'tutorial2',
+    'Potatomine Unlock':'tutorial3',
+    'Sauce Unlock':'tutorial4',
+    'random_zomboss_egypt':'random_zomboss_egypt',
+    'Map Unlock':'egypt1',
+    'Cabbagepult Unlock':'egypt2',
+    'Bloomerang Unlock':'egypt3',
+    'Powerupgadget Unlock':'egypt4',
+    'Iceburg Unlock':'egypt5',
+    'Branch Unlock Egypt 6':'egypt6',
+    'Note Egypt Unlock':'egypt7',
+    'World Key - Ancient Egypt':'egypt8',
+    'Gravebuster Unlock':'egypt9',
+    'egypt10':'egypt10',
+    'Branch Unlock Egypt 11':'egypt11',
+    'Dangerroom Egypt Unlock':'egypt12',
+    'Bonkchoy Unlock':'egypt13',
+    'egypt14':'egypt14',
+    'Branch Unlock Egypt 15':'egypt15',
+    'egypt16':'egypt16',
+    'Upgrade Pf Slots Lvl1 Unlock':'egypt17',
+    'egypt18':'egypt18',
+    'Repeater Unlock':'egypt19',
+    'egypt20':'egypt20',
+    'egypt20_1':'egypt20_1',
+    'Upgrade Starting Sun Lvl1 Unlock':'egypt21',
+    'egypt21_1':'egypt21_1',
+    'Branch Unlock Egypt 22':'egypt22',
+    'egypt22_1':'egypt22_1',
+    'Dangerroom Egypt Minigame Unlock':'egypt23',
+    'Twinsunflower Unlock':'egypt24',
+    'egypt24_1':'egypt24_1',
+    'Worldtrophy Egypt Unlock':'egypt25',
+    'egypt26':'egypt26',
+    'Branch Unlock Egypt 27':'egypt27',
+    'egypt28':'egypt28',
+    'egypt29':'egypt29',
+    'Branch Unlock Egypt 30':'egypt30',
+    'Dangerroom Egypt2 Unlock':'egypt31',
+    'egypt32':'egypt32',
+    'egypt33':'egypt33',
+    'Branch Unlock Egypt 34':'egypt34',
+    'egypt35':'egypt35',
+    'egypt_dangerroom':'egypt_dangerroom',
+    'egypt_dangerroom2':'egypt_dangerroom2',
+    'egypt_dangerroom_minigame':'egypt_dangerroom_minigame',
+    'random_egypt':'random_egypt',
+    'random_zomboss_pirate':'random_zomboss_pirate',
+    'Kernelpult Unlock':'pirate1',
+    'pirate2':'pirate2',
+    'Snapdragon Unlock':'pirate3',
+    'Dangerroom Pirate Unlock':'pirate4',
+    'Branch Unlock Pirate 5':'pirate5',
+    'Spikeweed Unlock':'pirate6',
+    'Note Pirate Unlock':'pirate7',
+    'World Key - Pirate Seas':'pirate8',
+    'Springbean Unlock':'pirate9',
+    'pirate10':'pirate10',
+    'Coconutcannon Unlock':'pirate11',
+    'Upgrade Sunshovel Lvl1 Unlock':'pirate12',
+    'pirate13':'pirate13',
+    'Threepeater Unlock':'pirate14',
+    'pirate15':'pirate15',
+    'Branch Unlock Pirate 16':'pirate16',
+    'pirate17':'pirate17',
+    'Spikerock Unlock':'pirate18',
+    'pirate18_1':'pirate18_1',
+    'Branch Unlock Pirate 19':'pirate19',
+    'pirate20':'pirate20',
+    'pirate20_1':'pirate20_1',
+    'Upgrade 7 Slots Unlock':'pirate21',
+    'pirate22':'pirate22',
+    'pirate22_1':'pirate22_1',
+    'Branch Unlock Pirate 23':'pirate23',
+    'pirate23_1':'pirate23_1',
+    'Cherry Bomb Unlock':'pirate24',
+    'pirate24_1':'pirate24_1',
+    'Worldtrophy Pirate Unlock':'pirate25',
+    'pirate26':'pirate26',
+    'Branch Unlock Pirate 27':'pirate27',
+    'pirate28':'pirate28',
+    'pirate29':'pirate29',
+    'Branch Unlock Pirate 30':'pirate30',
+    'pirate31':'pirate31',
+    'pirate32':'pirate32',
+    'Dangerroom Pirate2 Unlock':'pirate33',
+    'pirate34':'pirate34',
+    'pirate35':'pirate35',
+    'pirate_dangerroom':'pirate_dangerroom',
+    'pirate_dangerroom2':'pirate_dangerroom2',
+    'random_pirate':'random_pirate',
+    'random_zomboss_cowboy':'random_zomboss_cowboy',
+    'Splitpea Unlock':'cowboy1',
+    'Branch Unlock Cowboy 2':'cowboy2',
+    'Dangerroom Cowboy Unlock':'cowboy3',
+    'Chilibean Unlock':'cowboy4',
+    'cowboy5':'cowboy5',
+    'Peapod Unlock':'cowboy6',
+    'Note Cowboy Unlock':'cowboy7',
+    'World Key - Wild West':'cowboy8',
+    'Lightningreed Unlock':'cowboy9',
+    'cowboy10':'cowboy10',
+    'Upgrade Sunshovel Lvl2 Unlock':'cowboy11',
+    'Melonpult Unlock':'cowboy12',
+    'cowboy12_1':'cowboy12_1',
+    'cowboy13':'cowboy13',
+    'Branch Unlock Cowboy 14':'cowboy14',
+    'Upgrade Wallnut Firstaid Unlock':'cowboy15',
+    'cowboy16':'cowboy16',
+    'Branch Unlock Cowboy 17':'cowboy17',
+    'Tallnut Unlock':'cowboy18',
+    'cowboy18_1':'cowboy18_1',
+    'cowboy19':'cowboy19',
+    'Upgrade Pf Refresh Unlock':'cowboy20',
+    'cowboy21':'cowboy21',
+    'Branch Unlock Cowboy 22':'cowboy22',
+    'cowboy22_1':'cowboy22_1',
+    'cowboy23':'cowboy23',
+    'cowboy23_1':'cowboy23_1',
+    'Wintermelon Unlock':'cowboy24',
+    'cowboy24_1':'cowboy24_1',
+    'Worldtrophy Cowboy Unlock':'cowboy25',
+    'Branch Unlock Cowboy 26':'cowboy26',
+    'cowboy27':'cowboy27',
+    'cowboy28':'cowboy28',
+    'cowboy29':'cowboy29',
+    'Branch Unlock Cowboy 30':'cowboy30',
+    'cowboy31':'cowboy31',
+    'cowboy32':'cowboy32',
+    'Dangerroom Cowboy2 Unlock':'cowboy33',
+    'Branch Unlock Cowboy 34':'cowboy34',
+    'cowboy35':'cowboy35',
+    'cowboy_dangerroom':'cowboy_dangerroom',
+    'cowboy_dangerroom2':'cowboy_dangerroom2',
+    'random_cowboy':'random_cowboy',
+    'random_zomboss_future':'random_zomboss_future',
+    'Laser Bean Unlock':'future1',
+    'future2':'future2',
+    'Blover Unlock':'future3',
+    'Dangerroom Future Unlock':'future4',
+    'Branch Unlock Future 5':'future5',
+    'Citron Unlock':'future6',
+    'Note Future Unlock':'future7',
+    'World Key - Far Future':'future8',
+    'Empea Unlock':'future9',
+    'future10':'future10',
+    'future10_1':'future10_1',
+    'future10_2':'future10_2',
+    'future10_3':'future10_3',
+    'future10_4':'future10_4',
+    'Branch Unlock Future 11':'future11',
+    'future12':'future12',
+    'Holonut Unlock':'future13',
+    'future14':'future14',
+    'Branch Unlock Future 15':'future15',
+    'future16':'future16',
+    'Magnifyinggrass Unlock':'future17',
+    'future18':'future18',
+    'future19':'future19',
+    'Upgrade Manual Mowers 1 Unlock':'future20',
+    'future21':'future21',
+    'Branch Unlock Future 22':'future22',
+    'future23':'future23',
+    'Powerplant Unlock':'future24',
+    'Worldtrophy Future Unlock':'future25',
+    'future26':'future26',
+    'Branch Unlock Future 27':'future27',
+    'future28':'future28',
+    'future29':'future29',
+    'Branch Unlock Future 30':'future30',
+    'future31':'future31',
+    'Dangerroom Future2 Unlock':'future32',
+    'Dangerroom Future Sunbomb Unlock':'future33',
+    'Branch Unlock Future 34':'future34',
+    'future35':'future35',
+    'future_dangerroom':'future_dangerroom',
+    'future_dangerroom2':'future_dangerroom2',
+    'future_dangerroom_sunbomb':'future_dangerroom_sunbomb',
+    'random_future':'random_future',
+    'random_zomboss_dark':'random_zomboss_dark',
+    'Sunshroom Unlock':'dark1',
+    'Puffshroom Unlock':'dark2',
+    'dark3':'dark3',
+    'Fumeshroom Unlock':'dark4',
+    'dark5':'dark5',
+    'Sunbean Unlock':'dark6',
+    'dark7':'dark7',
+    'Branch Unlock Dark 8':'dark8',
+    'Note Dark Unlock':'dark9',
+    'World Key - Dark Ages':'dark10',
+    'Branch Unlock Dark 11':'dark11',
+    'Dangerroom Dark Unlock':'dark12',
+    'Branch Unlock Dark 13':'dark13',
+    'dark14':'dark14',
+    'Magnetshroom Unlock':'dark15',
+    'dark16':'dark16',
+    'dark17':'dark17',
+    'Branch Unlock Dark 18':'dark18',
+    'dark18_1':'dark18_1',
+    'dark19':'dark19',
+    'Worldtrophy Dark Unlock':'dark20',
+    'Scaredyshroom Unlock':'dark21',
+    'dark22':'dark22',
+    'Branch Unlock Dark 23':'dark23',
+    'Branch Unlock Dark 24':'dark24',
+    'Branch Unlock Dark 25':'dark25',
+    'Dangerroom Dark2 Unlock':'dark26',
+    'Dangerroom Dark Potion Unlock':'dark27',
+    'dark28':'dark28',
+    'Branch Unlock Dark 29':'dark29',
+    'dark30':'dark30',
+    'dark_dangerroom':'dark_dangerroom',
+    'dark_dangerroom2':'dark_dangerroom2',
+    'dark_dangerroom_potion':'dark_dangerroom_potion',
+    'random_dark':'random_dark',
+    'random_beach':'random_beach',
+    'Lilypad Unlock':'beach1',
+    'beach2':'beach2',
+    'beach3':'beach3',
+    'Branch Unlock Beach 4':'beach4',
+    'beach5':'beach5',
+    'Tanglekelp Unlock':'beach6',
+    'beach7':'beach7',
+    'Branch Unlock Beach 8':'beach8',
+    'beach9':'beach9',
+    'beach10':'beach10',
+    'Bowlingbulb Unlock':'beach11',
+    'Branch Unlock Beach 12':'beach12',
+    'beach13':'beach13',
+    'Branch Unlock Beach 14':'beach14',
+    'Note Beach Unlock':'beach15',
+    'World Key - Big Wave Beach':'beach16',
+    'Branch Unlock Beach 17':'beach17',
+    'beach18':'beach18',
+    'Guacodile Unlock':'beach19',
+    'Dangerroom Beach Unlock':'beach20',
+    'beach21':'beach21',
+    'Branch Unlock Beach 22':'beach22',
+    'beach23':'beach23',
+    'Dangerroom Beach Minigame Unlock':'beach24',
+    'Branch Unlock Beach 25':'beach25',
+    'beach26':'beach26',
+    'Banana Unlock':'beach27',
+    'beach28':'beach28',
+    'beach29':'beach29',
+    'Branch Unlock Beach 30':'beach30',
+    'Seashroom Unlock':'beach31',
+    'Worldtrophy Beach Unlock':'beach32',
+    'beach33':'beach33',
+    'beach34':'beach34',
+    'beach35':'beach35',
+    'Dangerroom Beach2 Unlock':'beach36',
+    'beach37':'beach37',
+    'beach38':'beach38',
+    'beach39':'beach39',
+    'beach40':'beach40',
+    'beach41':'beach41',
+    'beach42':'beach42',
+    'beach_dangerroom':'beach_dangerroom',
+    'beach_dangerroom2':'beach_dangerroom2',
+    'beach_dangerroom_minigame_beach':'beach_dangerroom_minigame_beach',
+    'beach_dangerroom_minigame_cowboy':'beach_dangerroom_minigame_cowboy',
+    'beach_dangerroom_minigame_dark':'beach_dangerroom_minigame_dark',
+    'beach_dangerroom_minigame_egypt':'beach_dangerroom_minigame_egypt',
+    'beach_dangerroom_minigame_future':'beach_dangerroom_minigame_future',
+    'beach_dangerroom_minigame_iceage':'beach_dangerroom_minigame_iceage',
+    'beach_dangerroom_minigame_lostcity':'beach_dangerroom_minigame_lostcity',
+    'beach_dangerroom_minigame_pirate':'beach_dangerroom_minigame_pirate',
+    'iceage_dangerroom':'iceage_dangerroom',
+    'Hotpotato Unlock':'iceage1',
+    'iceage2':'iceage2',
+    'iceage3':'iceage3',
+    'Branch Unlock Iceage 4':'iceage4',
+    'iceage5':'iceage5',
+    'Pepperpult Unlock':'iceage6',
+    'iceage7':'iceage7',
+    'Branch Unlock Iceage 8':'iceage8',
+    'iceage9':'iceage9',
+    'iceage10':'iceage10',
+    'Chardguard Unlock':'iceage11',
+    'Branch Unlock Iceage 12':'iceage12',
+    'iceage13':'iceage13',
+    'Branch Unlock Iceage 14':'iceage14',
+    'Note Iceage Unlock':'iceage15',
+    'World Key - Frostbite Caves':'iceage16',
+    'Branch Unlock Iceage 17':'iceage17',
+    'iceage18':'iceage18',
+    'Stunion Unlock':'iceage19',
+    'Dangerroom Iceage Unlock':'iceage20',
+    'iceage21':'iceage21',
+    'Branch Unlock Iceage 22':'iceage22',
+    'iceage23':'iceage23',
+    'Branch Unlock Iceage 24':'iceage24',
+    'iceage24_B':'iceage24_B',
+    'iceage25':'iceage25',
+    'Xshot Unlock':'iceage26',
+    'iceage27':'iceage27',
+    'iceage28':'iceage28',
+    'Branch Unlock Iceage 29':'iceage29',
+    'Worldtrophy Iceage Unlock':'iceage30',
+    'Branch Unlock Iceage 31':'iceage31',
+    'iceage32':'iceage32',
+    'iceage33':'iceage33',
+    'Branch Unlock Iceage 34':'iceage34',
+    'Dangerroom Iceage2 Unlock':'iceage35',
+    'iceage36':'iceage36',
+    'iceage37':'iceage37',
+    'iceage38':'iceage38',
+    'iceage39':'iceage39',
+    'iceage40':'iceage40',
+    'iceage_dangerroom2':'iceage_dangerroom2',
+    'lostcity_dangerroom':'lostcity_dangerroom',
+    'Redstinger Unlock':'lostcity1',
+    'lostcity2':'lostcity2',
+    'lostcity3':'lostcity3',
+    'Branch Unlock Lostcity 4':'lostcity4',
+    'lostcity5':'lostcity5',
+    'Akee Unlock':'lostcity6',
+    'lostcity7':'lostcity7',
+    'Branch Unlock Lostcity 8':'lostcity8',
+    'lostcity9':'lostcity9',
+    'Endurian Unlock':'lostcity10',
+    'lostcity11':'lostcity11',
+    'Branch Unlock Lostcity 12':'lostcity12',
+    'lostcity13':'lostcity13',
+    'Branch Unlock Lostcity 14':'lostcity14',
+    'Note Lostcity Unlock':'lostcity15',
+    'World Key - Lost City':'lostcity16',
+    'Branch Unlock Lostcity 17':'lostcity17',
+    'lostcity18':'lostcity18',
+    'Stallia Unlock':'lostcity19',
+    'Dangerroom Lostcity Unlock':'lostcity20',
+    'lostcity21':'lostcity21',
+    'lostcity22':'lostcity22',
+    'Branch Unlock Lostcity 23':'lostcity23',
+    'lostcity24':'lostcity24',
+    'lostcity25':'lostcity25',
+    'Goldleaf Unlock':'lostcity26',
+    'lostcity27':'lostcity27',
+    'Branch Unlock Lostcity 28':'lostcity28',
+    'lostcity29':'lostcity29',
+    'Branch Unlock Lostcity 30':'lostcity30',
+    'lostcity31':'lostcity31',
+    'Worldtrophy Lostcity Unlock':'lostcity32',
+    'Branch Unlock Lostcity 33':'lostcity33',
+    'Branch Unlock Lostcity 34':'lostcity34',
+    'Branch Unlock Lostcity 35':'lostcity35',
+    'Branch Unlock Lostcity 36':'lostcity36',
+    'lostcity37':'lostcity37',
+    'Branch Unlock Lostcity 38':'lostcity38',
+    'Dangerroom Lostcity2 Unlock':'lostcity39',
+    'Branch Unlock Lostcity 40':'lostcity40',
+    'Branch Unlock Lostcity 41':'lostcity41',
+    'lostcity42':'lostcity42',
+    'lostcity_dangerroom2':'lostcity_dangerroom2',
+    'kongfu_dangerroom':'kongfu_dangerroom',
+    'Firegourd Unlock':'kongfu1',
+    'kongfu2':'kongfu2',
+    'kongfu3':'kongfu3',
+    'kongfu4':'kongfu4',
+    'kongfu5':'kongfu5',
+    'Snowpea Unlock':'kongfu6',
+    'kongfu7':'kongfu7',
+    'World Key - Kongfu Temple':'kongfu8',
+    'kongfu9':'kongfu9',
+    'Bambooshoot Unlock':'kongfu10',
+    'kongfu11':'kongfu11',
+    'kongfu12':'kongfu12',
+    'Turnip Unlock':'kongfu13',
+    'Dangerroom Kongfu Unlock':'kongfu14',
+    'kongfu15':'kongfu15',
+    'kongfu16':'kongfu16',
+    'kongfu17':'kongfu17',
+    'kongfu18':'kongfu18',
+    'Peach Unlock':'kongfu19',
+    'kongfu20':'kongfu20',
+    'kongfu21':'kongfu21',
+    'kongfu22':'kongfu22',
+    'kongfu23':'kongfu23',
+    'kongfu24':'kongfu24',
+    'kongfu25':'kongfu25',
+    'kongfu26':'kongfu26',
+    'kongfu27':'kongfu27',
+    'kongfu28':'kongfu28',
+    'Lychee Unlock':'kongfu29',
+    'Dangerroom Kongfu2 Unlock':'kongfu30',
+    'kongfu31':'kongfu31',
+    'kongfu32':'kongfu32',
+    'kongfu33':'kongfu33',
+    'Solarsage Unlock':'kongfu34',
+    'kongfu35':'kongfu35',
+    'kongfu36':'kongfu36',
+    'kongfu37':'kongfu37',
+    'kongfu38':'kongfu38',
+    'kongfu39':'kongfu39',
+    'kongfu40':'kongfu40',
+    'kongfu41':'kongfu41',
+    'kongfu42':'kongfu42',
+    'kongfu43':'kongfu43',
+    'kongfu44':'kongfu44',
+    'kongfu45':'kongfu45',
+    'Cantaloupe Unlock':'kongfu46',
+    'Dangerroom Kongfu3 Unlock':'kongfu47',
+    'kongfu48':'kongfu48',
+    'kongfu_dangerroom2':'kongfu_dangerroom2',
+    'kongfu_dangerroom3':'kongfu_dangerroom3',
+    'kongfu_dangerroom4':'kongfu_dangerroom4',
+    'eighties_dangerroom':'eighties_dangerroom',
+    'Phatbeet Unlock':'eighties1',
+    'eighties2':'eighties2',
+    'eighties3':'eighties3',
+    'eighties4':'eighties4',
+    'Celerystalker Unlock':'eighties5',
+    'eighties6':'eighties6',
+    'eighties7':'eighties7',
+    'eighties8':'eighties8',
+    'Thymewarp Unlock':'eighties9',
+    'eighties10':'eighties10',
+    'eighties11':'eighties11',
+    'Branch Unlock Eighties 12':'eighties12',
+    'eighties13':'eighties13',
+    'Branch Unlock Eighties 14':'eighties14',
+    'eighties15':'eighties15',
+    'World Key - Neon Mixtape Tour':'eighties16',
+    'Garlic Unlock':'eighties17',
+    'eighties18':'eighties18',
+    'eighties19':'eighties19',
+    'Dangerroom Eighties Unlock':'eighties20',
+    'Sporeshroom Unlock':'eighties21',
+    'eighties22':'eighties22',
+    'eighties23':'eighties23',
+    'Branch Unlock Eighties 24':'eighties24',
+    'eighties25':'eighties25',
+    'Intensivecarrot Unlock':'eighties26',
+    'eighties27':'eighties27',
+    'eighties28':'eighties28',
+    'Branch Unlock Eighties 29':'eighties29',
+    'eighties30':'eighties30',
+    'eighties31':'eighties31',
+    'Worldtrophy Eighties Unlock':'eighties32',
+    'dino_dangerroom':'dino_dangerroom',
+    'Primalpeashooter Unlock':'dino1',
+    'dino2':'dino2',
+    'dino3':'dino3',
+    'Primalwallnut Unlock':'dino4',
+    'dino5':'dino5',
+    'Branch Unlock Dino 6':'dino6',
+    'Branch Unlock Dino 7':'dino7',
+    'Perfumeshroom Unlock':'dino8',
+    'dino9':'dino9',
+    'dino10':'dino10',
+    'dino11':'dino11',
+    'Branch Unlock Dino 12':'dino12',
+    'dino13':'dino13',
+    'Branch Unlock Dino 14':'dino14',
+    'Note Dino Unlock':'dino15',
+    'World Key - Jurassic Marsh':'dino16',
+    'Primalsunflower Unlock':'dino17',
+    'dino18':'dino18',
+    'dino19':'dino19',
+    'Dangerroom Dino Unlock':'dino20',
+    'dino21':'dino21',
+    'dino22':'dino22',
+    'Primalpotatomine Unlock':'dino23',
+    'Branch Unlock Dino 24':'dino24',
+    'dino25':'dino25',
+    'dino26':'dino26',
+    'dino27':'dino27',
+    'dino28':'dino28',
+    'Branch Unlock Dino 29':'dino29',
+    'dino30':'dino30',
+    'dino31':'dino31',
+    'Worldtrophy Dino Unlock':'dino32',
+    'Branch Unlock Dino 33':'dino33',
+    'dino34':'dino34',
+    'dino35':'dino35',
+    'Dangerroom Dino2 Unlock':'dino36',
+    'Branch Unlock Dino 37':'dino37',
+    'dino38':'dino38',
+    'dino39':'dino39',
+    'dino40':'dino40',
+    'Branch Unlock Dino 41':'dino41',
+    'dino42':'dino42',
+    'dino_dangerroom2':'dino_dangerroom2',
+    'modern_zomboss_01_egypt':'modern_zomboss_01_egypt',
+    'Moonflower Unlock':'modern1',
+    'modern2':'modern2',
+    'modern3':'modern3',
+    'Nightshade Unlock':'modern4',
+    'modern5':'modern5',
+    'Branch Unlock Modern 6':'modern6',
+    'Branch Unlock Modern 7':'modern7',
+    'modern8':'modern8',
+    'modern9':'modern9',
+    'Shadowshroom Unlock':'modern10',
+    'modern11':'modern11',
+    'Branch Unlock Modern 12':'modern12',
+    'modern13':'modern13',
+    'Branch Unlock Modern 14':'modern14',
+    'Note Modern Unlock':'modern15',
+    'World Key - Modern Day':'modern16',
+    'Dusklobber Unlock':'modern17',
+    'modern18':'modern18',
+    'modern19':'modern19',
+    'Dangerroom Modern Unlock':'modern20',
+    'modern21':'modern21',
+    'modern22':'modern22',
+    'Grimrose Unlock':'modern23',
+    'modern24':'modern24',
+    'Branch Unlock Modern 25':'modern25',
+    'modern26':'modern26',
+    'modern27':'modern27',
+    'modern28':'modern28',
+    'Branch Unlock Modern 29':'modern29',
+    'modern30':'modern30',
+    'modern31':'modern31',
+    'modern35':'modern35',
+    'Branch Unlock Modern 36':'modern36',
+    'modern37':'modern37',
+    'modern38':'modern38',
+    'Branch Unlock Modern 39':'modern39',
+    'Dangerroom Modern2 Unlock':'modern40',
+    'modern41':'modern41',
+    'modern42':'modern42',
+    'Branch Unlock Modern 43':'modern43',
+    'modern44':'modern44',
+    'modern_dangerroom':'modern_dangerroom',
+    'modern_dangerroom2':'modern_dangerroom2',
+    'modern_zomboss_02_pirate':'modern_zomboss_02_pirate',
+    'modern_zomboss_03_cowboy':'modern_zomboss_03_cowboy',
+    'modern_zomboss_04_future':'modern_zomboss_04_future',
+    'modern_zomboss_05_dark':'modern_zomboss_05_dark',
+    'modern_zomboss_06_beach':'modern_zomboss_06_beach',
+    'Skyshooter Unlock':'sky1',
+    'sky2':'sky2',
+    'Upgrade Sky Shield Unlock':'sky3',
+    'sky4':'sky4',
+    'sky5':'sky5',
+    'Pineapple Unlock':'sky6',
+    'sky7':'sky7',
+    'Moonbean Unlock':'sky8',
+    'sky9':'sky9',
+    'sky10':'sky10',
+    'Anthurium Unlock':'sky11',
+    'sky12':'sky12',
+    'sky13':'sky13',
+    'sky14':'sky14',
+    'sky15':'sky15',
+    'World Key - Sky City':'sky16',
+    'aloe0':'aloe0.JSON',
+    'aloe3':'aloe3.JSON',
+    'appease1_0':'appease1_0',
+    'appease1_2':'appease1_2',
+    'appease1_4':'appease1_4',
+    'Pvine Unlock':'appease1_6',
+    'appease2_1':'appease2_1',
+    'appease2_3':'appease2_3',
+    'Megagatling Unlock':'appease2_5',
+    'atombomb0':'atombomb0',
+    'atombomb2':'atombomb2',
+    'atombomb4':'atombomb4',
+    'bank_theft1':'bank_theft1',
+    'bank_theft3':'bank_theft3',
+    'bank_theft5':'bank_theft5',
+    'bloominghearts0':'bloominghearts0',
+    'bloominghearts2':'bloominghearts2',
+    'bloominghearts4':'bloominghearts4',
+    'buttercup0':'buttercup0',
+    'buttercup2':'buttercup2',
+    'buttercup4':'buttercup4',
+    'conceal0':'conceal0',
+    'conceal2':'conceal2',
+    'conceal4':'conceal4',
+    'conceal6':'conceal6',
+    'conceal8':'conceal8',
+    'conceal10':'conceal10',
+    'doomshroom0':'doomshroom0',
+    'doomshroom2':'doomshroom2',
+    'doomshroom4':'doomshroom4',
+    'electriccurrant0':'electriccurrant0',
+    'electriccurrant2':'electriccurrant2',
+    'electriccurrant4':'electriccurrant4',
+    'enlighten0':'enlighten0',
+    'enlighten2':'enlighten2',
+    'enlighten4':'enlighten4',
+    'enlighten6':'enlighten6',
+    'ghostpepper0':'ghostpepper0',
+    'ghostpepper2':'ghostpepper2',
+    'gloomshroom0':'gloomshroom0',
+    'gloomshroom2':'gloomshroom2',
+    'gloomshroom4':'gloomshroom4',
+    'gloomshroom6':'gloomshroom6',
+    'goldbloom0':'goldbloom0',
+    'goldbloom2':'goldbloom2',
+    'hotdate1':'hotdate1',
+    'Hotdate Unlock':'hotdate3',
+    'icebloom0':'icebloom0',
+    'icebloom2':'icebloom2',
+    'icebloom4':'icebloom4',
+    'iceshroom0':'iceshroom0',
+    'iceshroom2':'iceshroom2',
+    'iceshroom4':'iceshroom4',
+    'meteorflower0':'meteorflower0',
+    'meteorflower2':'meteorflower2',
+    'parsnip0':'parsnip0',
+    'parsnip2':'parsnip2',
+    'parsnip4':'parsnip4',
+    'plantern0':'plantern0',
+    'plantern2':'plantern2',
+    'plantern4':'plantern4',
+    'reinforce0':'reinforce0',
+    'reinforce2':'reinforce2',
+    'reinforce4':'reinforce4',
+    'reinforce6':'reinforce6',
+    'reinforce8':'reinforce8',
+    'reinforce10':'reinforce10',
+    'sapfling0':'sapfling0',
+    'sapfling2':'sapfling2',
+    'sapfling4':'sapfling4',
+    'sapfling6':'sapfling6',
+    'seashooter0':'seashooter0',
+    'seashooter2':'seashooter2',
+    'shootingstarfruit1':'shootingstarfruit1',
+    'shootingstarfruit2':'shootingstarfruit2',
+    'shootingstarfruit3':'shootingstarfruit3',
+    'solartomato0':'solartomato0',
+    'solartomato2':'solartomato2',
+    'solartomato4':'solartomato4',
+    'squash0':'squash0',
+    'squash2':'squash2',
+    'strawburst0':'strawburst0',
+    'strawburst2':'strawburst2',
+    'strawburst4':'strawburst4',
+    'strawburst6':'strawburst6',
+    'sweetpotato0':'sweetpotato0',
+    'sweetpotato2':'sweetpotato2',
+    'sweetpotato4':'sweetpotato4',
+    'umbrellaleaf0':'umbrellaleaf0',
+    'umbrellaleaf2':'umbrellaleaf2',
+    'umbrellaleaf4':'umbrellaleaf4',
+    'umbrellaleaf6':'umbrellaleaf6',
+    'umbrellaleaf8':'umbrellaleaf8',
+    'umbrellaleaf10':'umbrellaleaf10',
+    'vamporcini0':'vamporcini0',
+    'vamporcini2':'vamporcini2',
   };
 
+  // Simple region lookup for Modern Day check
+  function getRegion(locName){
+    const md_prefixes=['modern_zomboss','modern_dangerroom','modern','Moonflower','Nightshade',
+      'Shadowshroom','Dusklobber','Grimrose','Branch Unlock Modern','Dangerroom Modern',
+      'Note Modern','World Key - Modern','Worldtrophy Modern'];
+    if(md_prefixes.some(p=>locName.startsWith(p)||locName===p)) return 'Modern Day';
+    return null;
+  }
+
   const VICTORY_LOCS = [
-    'Ancient Egypt Zomboss','Pirate Seas Zomboss','Wild West Zomboss',
-    'Far Future Zomboss','Dark Ages Zomboss','Big Wave Beach Zomboss',
-    'Frostbite Caves Zomboss','Lost City Zomboss','Kongfu Temple Zomboss 1',
-    'Neon Mixtape Tour Zomboss','Jurassic Marsh Zomboss','Modern Day Zomboss'
+    'random_zomboss_egypt',
+    'random_zomboss_pirate',
+    'random_zomboss_cowboy',
+    'random_zomboss_future',
+    'random_zomboss_dark',
+    'random_beach',
+    'iceage_dangerroom',
+    'lostcity_dangerroom',
+    'kongfu_dangerroom',
+    'eighties_dangerroom',
+    'dino_dangerroom',
   ];
 
   // ── State ─────────────────────────────────────────────────────────────────
   let cfg   = { server:'localhost:38281', slot:'', password:'' };
-  let st    = { checked:[], lastIdx:0, keys:0 };
+  let st    = { checked:[], lastIdx:0, zombossesRequired:7, receivedKeys:[], receivedItems:[] };
 
   const lsCfg  = () => { try { Object.assign(cfg, JSON.parse(localStorage.getItem(CFG_KEY)||'{}')); } catch(e){} };
   const svCfg  = () => localStorage.setItem(CFG_KEY, JSON.stringify(cfg));
@@ -1040,13 +928,84 @@ window.electron = electron;
   }
   function writeSave(arr) { localStorage.setItem(SAVE_KEY, JSON.stringify(arr)); }
 
+  // Returns true if the player has completed the tutorial (forceLevel is past tutorials)
+  function isTutorialComplete() {
+    const arr=readSave(); if(!arr) return false;
+    const p=arr[0]; if(!p) return false;
+    const fl=p.forceLevel||'';
+    // Still in tutorial if forceLevel is tutorial1-4
+    return !['tutorial1','tutorial2','tutorial3','tutorial4'].includes(fl);
+  }
+
+  // Lock the 4 tutorial-forced plants and re-apply only what AP has sent
+  // Call this after tutorial completes and whenever items arrive
+  // Rebuild _AP_grantedPlantIds from st.receivedItems and re-apply all
+  // received plant unlocks. Called on connect, item receipt, and every poll.
+  // The BASEUNLOCKLIST interceptor handles blocking tutorial plants at source.
+  function enforcePlantLocks() {
+    if(!isTutorialComplete()) return;
+    if(!st.receivedItems || !st.receivedItems.length) return;
+
+    // Rebuild the granted set from received items
+    if(!window._AP_grantedPlantIds) window._AP_grantedPlantIds = new Set();
+    st.receivedItems.forEach(name => {
+      const pid = ITEM_PLANT[name];
+      if(pid !== undefined) window._AP_grantedPlantIds.add(pid);
+    });
+
+    // Re-apply all granted plants (idempotent — game checks progress before setting)
+    if(window._AP_AllPlayerProperties) {
+      st.receivedItems.forEach(name => {
+        const pid = ITEM_PLANT[name];
+        if(pid !== undefined) {
+          try { window._AP_AllPlayerProperties.unlockPlant(pid); } catch(e) {}
+        }
+      });
+      try { window._AP_AllPlayerProperties.savePP(); } catch(e) {}
+    }
+  }
+
+  // forceLevel order for tutorial progression
+  const TUTORIAL_ORDER = ['tutorial1','tutorial2','tutorial3','tutorial4','egypt1'];
+
+  function isTutorialDone(tutorialId) {
+    // tutorial N is done if forceLevel has advanced past it
+    const arr=readSave(); if(!arr) return false;
+    const p=arr[0]; if(!p) return false;
+    const forceLevel = p.forceLevel || '';
+    const myIdx = TUTORIAL_ORDER.indexOf(tutorialId);
+    if(myIdx < 0) return false;
+    // Done if forceLevel is a later tutorial, egypt1, or empty (already on worldmap)
+    if(forceLevel === '') return true;  // past all tutorials
+    const forceLevelIdx = TUTORIAL_ORDER.indexOf(forceLevel);
+    if(forceLevelIdx < 0) return true;  // some other world level = past tutorials
+    return forceLevelIdx > myIdx;
+  }
+
   function isFinished(levelId) {
+    if(TUTORIAL_ORDER.includes(levelId)) return isTutorialDone(levelId);
     const arr=readSave(); if(!arr) return false;
     const p=arr[0]; if(!p||!p.levelProps) return false;
-    const e=p.levelProps[levelId]; return e && (e.progress||0)>=4;
+    // progress=3 (unlocked_willbeFinished) is set immediately on level win by victory()
+    // progress=4 (finished) is set later by worldmap node animation - we don't want to wait
+    const e=p.levelProps[levelId]; return e && (e.progress||0)>=3;
   }
 
   function unlockPlant(plantId) {
+    // Register this plant as AP-granted so the BASEUNLOCKLIST interceptor
+    // allows it through when the game calls unlockPlant internally
+    if(!window._AP_grantedPlantIds) window._AP_grantedPlantIds = new Set();
+    window._AP_grantedPlantIds.add(plantId);
+
+    // Prefer live in-memory API (instant, no reload required)
+    if(window._AP_AllPlayerProperties) {
+      try {
+        window._AP_AllPlayerProperties.unlockPlant(plantId);
+        window._AP_AllPlayerProperties.savePP();
+        return;
+      } catch(e) { /* fall through to localStorage method */ }
+    }
+    // Fallback: write to localStorage (picked up on next game load)
     const arr=readSave(); if(!arr) return;
     const p=arr[0]; if(!p) return;
     if(!p.plantProps) p.plantProps={};
@@ -1057,6 +1016,15 @@ window.electron = electron;
   }
 
   function unlockWorld(worldId) {
+    // Prefer live in-memory API
+    if(window._AP_AllPlayerProperties) {
+      try {
+        window._AP_AllPlayerProperties.unlockWorld(worldId);
+        window._AP_AllPlayerProperties.savePP();
+        return;
+      } catch(e) { /* fall through */ }
+    }
+    // Fallback: localStorage
     const arr=readSave(); if(!arr) return;
     const p=arr[0]; if(!p) return;
     if(!p.worldProps) p.worldProps={};
@@ -1097,6 +1065,10 @@ window.electron = electron;
         break;
       case 'Connected':
         conn=true;setStatus('✓ '+cfg.slot,'#4f4');
+        if(pkt.slot_data && pkt.slot_data.zombosses_required !== undefined){
+          st.zombossesRequired = pkt.slot_data.zombosses_required;
+          svSt();
+        }
         const ids=st.checked.map(n=>locIds[n]).filter(Boolean);
         if(ids.length) send([{cmd:'LocationChecks',locations:ids}]);
         send([{cmd:'Sync'}]);
@@ -1108,7 +1080,12 @@ window.electron = electron;
           const gi=(pkt.index||0)+i;
           if(gi<st.lastIdx) return;
           const name=itemNames[item.item];
-          if(name) applyItem(name);
+          if(name){
+            // Track all received items for enforcePlantLocks replay
+            if(!st.receivedItems) st.receivedItems=[];
+            if(!st.receivedItems.includes(name)) st.receivedItems.push(name);
+            applyItem(name);
+          }
           st.lastIdx=gi+1;
         });
         svSt();break;
@@ -1124,10 +1101,14 @@ window.electron = electron;
   }
 
   function applyItem(name) {
-    if(name==='World Key'){
-      st.keys=(st.keys||0)+1;
-      for(const[req,worlds] of KEY_GATES) if(st.keys>=req) worlds.forEach(w=>unlockWorld(w));
-      toast('🔑 World Key ('+st.keys+'/12)','#fa0');return;
+    if(WORLD_KEY_MAP[name]){
+      WORLD_KEY_MAP[name].forEach(w=>unlockWorld(w));
+      toast('🔑 '+name,'#fa0');
+      // Track received keys for Modern Day unlock check
+      if(!st.receivedKeys) st.receivedKeys=[];
+      if(!st.receivedKeys.includes(name)) st.receivedKeys.push(name);
+      svSt();
+      return;
     }
     const pid=ITEM_PLANT[name];
     if(pid!==undefined){unlockPlant(pid);toast('🌱 '+name,'#4f4');return;}
@@ -1135,19 +1116,33 @@ window.electron = electron;
   }
 
   // ── Location polling (every 2s) ───────────────────────────────────────────
+  function canAccessModernDay(){
+    if(!st.receivedKeys || !st.receivedKeys.includes('Modern Day Key')) return false;
+    const beaten = VICTORY_LOCS.filter(l=>st.checked.includes(l)).length;
+    return beaten >= (st.zombossesRequired||7);
+  }
+
   function pollChecks(){
-    for(const[loc,levels] of Object.entries(LOC_LEVELS)){
+    // Lock tutorial-forced plants and restore only AP-granted ones
+    enforcePlantLocks();
+    for(const[loc,levelId] of Object.entries(LOC_LEVELS)){
       if(st.checked.includes(loc)) continue;
-      if(levels.every(isFinished)) fireCheck(loc);
+      if(isFinished(levelId)) fireCheck(loc);
     }
   }
 
   function fireCheck(loc){
     if(st.checked.includes(loc)) return;
+    // Check Modern Day accessibility before firing any Modern Day check
+    const md_locs = Object.entries(LOC_LEVELS)
+      .filter(([n,l])=>{ const r=getRegion(n); return r==='Modern Day'; })
+      .map(([n])=>n);
+    if(md_locs.includes(loc) && !canAccessModernDay()) return;
     st.checked.push(loc);svSt();
     const id=locIds[loc];
     if(id&&conn) send([{cmd:'LocationChecks',locations:[id]}]);
-    if(VICTORY_LOCS.every(l=>st.checked.includes(l)))
+    // Victory: Modern Day zomboss checked
+    if(loc==='modern_zomboss_01_egypt')
       send([{cmd:'StatusUpdate',status:30}]);
   }
 
@@ -1239,7 +1234,7 @@ window.electron = electron;
     lsCfg();lsSt();
     buildUI();
     setInterval(pollChecks,2000);
-    if(cfg.slot) connect();
+    // Never auto-connect — user must click Connect manually each session
   }
 
   document.readyState==='loading'
