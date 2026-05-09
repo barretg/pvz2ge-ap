@@ -83,7 +83,7 @@ BASE_ID   = 0xD1A2B3C4
 KEYED_WORLDS = [
     "Pirate Seas", "Wild West", "Far Future", "Dark Ages",
     "Big Wave Beach", "Frostbite Caves", "Lost City",
-    "Kongfu Temple", "Neon Mixtape Tour", "Jurassic Marsh", "Modern Day",
+    "Kongfu Temple", "Neon Mixtape Tour", "Jurassic Marsh", "Modern Day", "Aerial Fortress",
 ]
 
 # Zomboss location name per world (these are the boss fights)
@@ -115,10 +115,12 @@ SIDE_PATH_REGIONS = [
     "Aloe Sidepath", "Appease Sidepath", "Atombomb Sidepath", "Bank Sidepath",
     "Bloominghearts Sidepath", "Buttercup Sidepath", "Conceal Sidepath",
     "Doomshroom Sidepath", "Electriccurrant Sidepath", "Enlighten Sidepath",
+    "Epic Beghouled Sidepath", "Floawerpot Sidepath",
     "Ghostpepper Sidepath", "Gloomshroom Sidepath", "Goldbloom Sidepath",
     "Hotdate Sidepath", "Icebloom Sidepath", "Iceshroom Sidepath",
-    "Meteorflower Sidepath", "Parsnip Sidepath", "Plantern Sidepath",
-    "Reinforce Sidepath", "Sapfling Sidepath", "Seashooter Sidepath",
+    "Meteorflower Sidepath", "Mixed Sidepath", "Parsnip Sidepath", "Plantern Sidepath",
+    "Reinforce Sidepath", "Reinforcemint Sidepath", "Rhythm Sidepath",
+    "Sandbox Sidepath", "Sapfling Sidepath", "Seashooter Sidepath",
     "Shootingstarfruit Sidepath", "Solartomato Sidepath", "Squash Sidepath",
     "Strawburst Sidepath", "Sweetpotato Sidepath", "Umbrellaleaf Sidepath",
     "Vamporcini Sidepath",
@@ -894,24 +896,28 @@ def _make_locs() -> List[PvZ2LocationData]:
     add("modern_zomboss_04_future", "Modern Day")
     add("modern_zomboss_05_dark", "Modern Day")
     add("modern_zomboss_06_beach", "Modern Day")
+    add("modern_zomboss_07_iceage", "Modern Day")
+    add("modern_zomboss_08_lostcity", "Modern Day")
+    add("modern_zomboss_09_eighties", "Modern Day")
+    add("modern_zomboss_10_dino", "Modern Day")
 
-    # ── Sky City (post-game bonus, always accessible after Modern Day) ──
-    add("Skyshooter Unlock", "Sky City")
-    add("sky2", "Sky City")
-    add("Upgrade Sky Shield Unlock", "Sky City")
-    add("sky4", "Sky City")
-    add("sky5", "Sky City")
-    add("Pineapple Unlock", "Sky City")
-    add("sky7", "Sky City")
-    add("Moonbean Unlock", "Sky City")
-    add("sky9", "Sky City")
-    add("sky10", "Sky City")
-    add("Anthurium Unlock", "Sky City")
-    add("sky12", "Sky City")
-    add("sky13", "Sky City")
-    add("sky14", "Sky City")
-    add("sky15", "Sky City")
-    add("World Key - Sky City", "Sky City")
+    # ── Aerial Fortress ──
+    add("Skyshooter Unlock", "Aerial Fortress")
+    add("sky2", "Aerial Fortress")
+    add("Upgrade Sky Shield Unlock", "Aerial Fortress")
+    add("sky4", "Aerial Fortress")
+    add("sky5", "Aerial Fortress")
+    add("Pineapple Unlock", "Aerial Fortress")
+    add("sky7", "Aerial Fortress")
+    add("Moonbean Unlock", "Aerial Fortress")
+    add("sky9", "Aerial Fortress")
+    add("sky10", "Aerial Fortress")
+    add("Anthurium Unlock", "Aerial Fortress")
+    add("sky12", "Aerial Fortress")
+    add("sky13", "Aerial Fortress")
+    add("sky14", "Aerial Fortress")
+    add("sky15", "Aerial Fortress")
+    add("World Key - Aerial Fortress", "Aerial Fortress")
 
     # ── Side Paths (always accessible from Tutorial) ──
     add("aloe0", "Aloe Sidepath"); add("aloe1", "Aloe Sidepath"); add("aloe2", "Aloe Sidepath")
@@ -1039,6 +1045,30 @@ def _make_locs() -> List[PvZ2LocationData]:
     add("vamporcini0", "Vamporcini Sidepath"); add("vamporcini1", "Vamporcini Sidepath")
     add("vamporcini2", "Vamporcini Sidepath"); add("Vamporcini Unlock", "Vamporcini Sidepath")
 
+    add("epic_beghouled1", "Epic Beghouled Sidepath")
+    add("epic_beghouled2", "Epic Beghouled Sidepath")
+    add("epic_beghouled3", "Epic Beghouled Sidepath")
+    add("epic_beghouled4", "Epic Beghouled Sidepath")
+    add("epic_beghouled5", "Epic Beghouled Sidepath")
+
+    add("floawerpot1", "Floawerpot Sidepath")
+    add("floawerpot2", "Floawerpot Sidepath")
+    add("floawerpot3", "Floawerpot Sidepath")
+
+    add("mixed_dangerroom2", "Mixed Sidepath")
+
+    add("reinforcemint_try1", "Reinforcemint Sidepath")
+    add("reinforcemint_try2", "Reinforcemint Sidepath")
+    add("reinforcemint_try3", "Reinforcemint Sidepath")
+
+    add("rhythm1", "Rhythm Sidepath")
+
+    add("sandbox", "Sandbox Sidepath")
+    add("sandbox_green", "Sandbox Sidepath")
+    add("sandbox_modern", "Sandbox Sidepath")
+    add("sandbox_modern_night", "Sandbox Sidepath")
+    add("sandbox_sky", "Sandbox Sidepath")
+
     return locs
 
 
@@ -1154,9 +1184,6 @@ class PvZ2GardendlessWorld(World):
             return defeated >= n
 
         tutorial.connect(regions["Modern Day"], "Enter Modern Day", modern_day_rule)
-
-        # Sky City — bonus, accessible after Modern Day, no key
-        regions["Modern Day"].connect(regions["Sky City"])
 
         # Side paths — always accessible from Tutorial
         for sp in SIDE_PATH_REGIONS:
