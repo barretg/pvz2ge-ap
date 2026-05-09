@@ -9,7 +9,7 @@ Victory = defeat the Modern Day Zomboss.
 
 from worlds.AutoWorld import World, WebWorld
 from BaseClasses import Region, Location, Item, ItemClassification, Tutorial
-from Options import Choice, Range, PerGameCommonOptions
+from Options import Choice, Range, Toggle, PerGameCommonOptions
 from settings import get_settings
 import settings
 from typing import Dict, List, Any
@@ -166,10 +166,20 @@ class WorldsRequired(Range):
     default      = 7
 
 
+class SkipTutorial(Toggle):
+    """
+    Skip the forced tutorial sequence at game start.
+    When enabled, the game begins directly on the world map and all
+    tutorial location checks are sent automatically on connect.
+    """
+    display_name = "Skip Tutorial"
+
+
 @dataclasses.dataclass
 class PvZ2Options(PerGameCommonOptions):
     goal_type:       GoalType
     worlds_required: WorldsRequired
+    skip_tutorial:   SkipTutorial
 
 
 # ── Items ─────────────────────────────────────────────────────────────────────
@@ -1269,4 +1279,5 @@ class PvZ2GardendlessWorld(World):
             "worlds_required": self.options.worlds_required.value,
             "goal_locations":  goal_locs,
             "victory_locations": VICTORY_LOC_NAMES,
+            "skip_tutorial":     bool(self.options.skip_tutorial),
         }

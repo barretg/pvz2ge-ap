@@ -1124,10 +1124,8 @@ window.electron = electron;
 
   // Returns true if the player has completed the tutorial (forceLevel is past tutorials)
   function isTutorialComplete() {
-    const arr=readSave(); if(!arr) return false;
-    const p=arr[0]; if(!p) return false;
-    const fl=p.forceLevel||'';
-    // Still in tutorial if forceLevel is tutorial1-4
+    const p = window._AP_AllPlayerProperties;
+    const fl = (p ? p.forceLevel : null) ?? (()=>{const a=readSave();return a&&a[0]?a[0].forceLevel:null;})() || '';
     return !['tutorial1','tutorial2','tutorial3','tutorial4'].includes(fl);
   }
 
@@ -1156,29 +1154,7 @@ window.electron = electron;
     }
     const knownCns = new Set(Object.values(ID_TO_CN));
 
-    // ── Primary: clean the save in localStorage directly ─────────────────────
-    // This works even if the SystemJS hook never fired (_AP_AllPlayerProperties null).
-    try {
-      const arr = readSave();
-      if(arr && arr[0] && arr[0].plantProps) {
-        const pp = arr[0].plantProps;
-        const removed = [];
-        for(const cn of Object.keys(pp)) {
-          if(knownCns.has(cn) && !authorizedCns.has(cn)) {
-            delete pp[cn];
-            removed.push(cn);
-          }
-        }
-        if(removed.length) {
-          console.log('[enforce] removed from save: ' + removed.join(', '));
-          writeSave(arr);
-        } else {
-          console.log('[enforce] save is clean');
-        }
-      }
-    } catch(e) { console.log('[enforce] save error: ' + e); }
-
-    // ── Secondary: also clean in-memory plantProps via AllPlayerProperties ────
+    // Clean in-memory plantProps via AllPlayerProperties
     const APP = window._AP_AllPlayerProperties;
     if(APP) {
       try {
@@ -1201,8 +1177,6 @@ window.electron = electron;
         if(pid !== undefined) try { APP.unlockPlant(pid); } catch(e) {}
       });
       try { APP.savePP(); } catch(e) {}
-    } else {
-      console.log('[enforce] _AP_AllPlayerProperties not set — save-only cleanup applied');
     }
   }
 
@@ -1211,9 +1185,8 @@ window.electron = electron;
 
   function isTutorialDone(tutorialId) {
     // tutorial N is done if forceLevel has advanced past it
-    const arr=readSave(); if(!arr) return false;
-    const p=arr[0]; if(!p) return false;
-    const forceLevel = p.forceLevel || '';
+    const app = window._AP_AllPlayerProperties;
+    const forceLevel = (app ? app.forceLevel : null) ?? (()=>{const a=readSave();return a&&a[0]?a[0].forceLevel:null;})() || '';
     const myIdx = TUTORIAL_ORDER.indexOf(tutorialId);
     if(myIdx < 0) return false;
     // Done if forceLevel is a later tutorial, egypt1, or empty (already on worldmap)
@@ -1225,11 +1198,13 @@ window.electron = electron;
 
   function isFinished(levelId) {
     if(TUTORIAL_ORDER.includes(levelId)) return isTutorialDone(levelId);
-    const arr=readSave(); if(!arr) return false;
-    const p=arr[0]; if(!p||!p.levelProps) return false;
+    // Prefer live in-memory data (slot-agnostic); fall back to localStorage slot 0
+    const app = window._AP_AllPlayerProperties;
+    const lp = app ? app.levelProps : (()=>{const a=readSave();return a&&a[0]?a[0].levelProps:null;})();
+    if(!lp) return false;
     // progress=3 (unlocked_willbeFinished) is set immediately on level win by victory()
     // progress=4 (finished) is set later by worldmap node animation - we don't want to wait
-    const e=p.levelProps[levelId]; return e && (e.progress||0)>=3;
+    const e=lp[levelId]; return e && (e.progress||0)>=3;
   }
 
   function unlockPlant(plantId) {
@@ -1320,6 +1295,16 @@ window.electron = electron;
         if(pkt.slot_data){
           goalLocs  = pkt.slot_data.goal_locations  || [];
           worldsReq = pkt.slot_data.worlds_required || 7;
+          if(pkt.slot_data.skip_tutorial){
+            try {
+              const arr=readSave();
+              if(arr && arr[0] && TUTORIAL_ORDER.includes(arr[0].forceLevel||'')){
+                arr[0].forceLevel='';
+                writeSave(arr);
+                log('Tutorial skipped — starting on world map');
+              }
+            } catch(e){}
+          }
         }
         const ids=st.checked.map(n=>locIds[n]).filter(Boolean);
         if(ids.length) send([{cmd:'LocationChecks',locations:ids}]);
