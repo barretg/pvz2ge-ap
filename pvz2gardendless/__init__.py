@@ -1123,8 +1123,9 @@ class PvZ2GardendlessWorld(World):
     after collecting the Modern Day Key AND defeating a configurable number
     of Zomboss fights. Victory = defeat the Modern Day Zomboss.
     """
-    game = GAME_NAME
-    web  = PvZ2Web()
+    game         = GAME_NAME
+    settings_key = "pvz2gardendless"
+    web          = PvZ2Web()
     settings: PvZ2Settings
     topology_present = True
 

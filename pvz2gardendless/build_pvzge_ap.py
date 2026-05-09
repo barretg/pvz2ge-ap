@@ -1137,6 +1137,9 @@ window.electron = electron;
   // received plant unlocks. Called on connect, item receipt, and every poll.
   // The BASEUNLOCKLIST interceptor handles blocking tutorial plants at source.
   function enforcePlantLocks() {
+    console.log('[enforce] called — tutorialComplete=' + isTutorialComplete()
+      + ' APP=' + !!window._AP_AllPlayerProperties
+      + ' granted=' + (window._AP_grantedPlantIds ? window._AP_grantedPlantIds.size : 'null'));
     if(!isTutorialComplete()) return;
 
     // Rebuild the granted set from received items
@@ -1146,40 +1149,61 @@ window.electron = electron;
       if(pid !== undefined) window._AP_grantedPlantIds.add(pid);
     });
 
-    const AP = window._AP_AllPlayerProperties;
-    if(!AP) return;
-
-    // Build the set of authorized codenames
+    // Build authorized / known codename sets
     const authorizedCns = new Set();
     for(const pid in ID_TO_CN) {
       if(window._AP_grantedPlantIds.has(Number(pid))) authorizedCns.add(ID_TO_CN[pid]);
     }
     const knownCns = new Set(Object.values(ID_TO_CN));
 
-    // Strip unauthorized plants from in-memory plantProps, then save.
-    // Deleting through the Proxy is fine — deleteProperty falls through to the target.
-    let dirty = false;
+    // ── Primary: clean the save in localStorage directly ─────────────────────
+    // This works even if the SystemJS hook never fired (_AP_AllPlayerProperties null).
     try {
-      const pp = AP.plantProps;
-      if(pp && typeof pp === 'object') {
+      const arr = readSave();
+      if(arr && arr[0] && arr[0].plantProps) {
+        const pp = arr[0].plantProps;
+        const removed = [];
         for(const cn of Object.keys(pp)) {
           if(knownCns.has(cn) && !authorizedCns.has(cn)) {
             delete pp[cn];
-            dirty = true;
+            removed.push(cn);
           }
         }
+        if(removed.length) {
+          console.log('[enforce] removed from save: ' + removed.join(', '));
+          writeSave(arr);
+        } else {
+          console.log('[enforce] save is clean');
+        }
       }
-    } catch(e) {}
+    } catch(e) { console.log('[enforce] save error: ' + e); }
 
-    // Re-apply all granted plants (idempotent)
-    if(st.receivedItems) st.receivedItems.forEach(name => {
-      const pid = ITEM_PLANT[name];
-      if(pid !== undefined) {
-        try { AP.unlockPlant(pid); } catch(e) {}
-      }
-    });
+    // ── Secondary: also clean in-memory plantProps via AllPlayerProperties ────
+    const APP = window._AP_AllPlayerProperties;
+    if(APP) {
+      try {
+        const pp = APP.plantProps;
+        if(pp && typeof pp === 'object') {
+          const removed = [];
+          for(const cn of Object.keys(pp)) {
+            if(knownCns.has(cn) && !authorizedCns.has(cn)) {
+              delete pp[cn];
+              removed.push(cn);
+            }
+          }
+          if(removed.length) console.log('[enforce] removed from memory: ' + removed.join(', '));
+        }
+      } catch(e) { console.log('[enforce] memory error: ' + e); }
 
-    try { AP.savePP(); } catch(e) {}
+      // Re-apply all granted plants then save
+      if(st.receivedItems) st.receivedItems.forEach(name => {
+        const pid = ITEM_PLANT[name];
+        if(pid !== undefined) try { APP.unlockPlant(pid); } catch(e) {}
+      });
+      try { APP.savePP(); } catch(e) {}
+    } else {
+      console.log('[enforce] _AP_AllPlayerProperties not set — save-only cleanup applied');
+    }
   }
 
   // forceLevel order for tutorial progression
@@ -1353,11 +1377,11 @@ window.electron = electron;
   }
 
   function pollChecks(){
-    // Only check when actively connected — prevents stale saves from
-    // firing checks before the player has loaded into their game
-    if(!conn || !sessionActive) return;
-    // Lock tutorial-forced plants and restore only AP-granted ones
+    // Plant enforcement runs regardless of connection state — unauthorized
+    // plants should be purged even before the player connects to AP.
     enforcePlantLocks();
+    // Only fire location checks when actively connected
+    if(!conn || !sessionActive) return;
     for(const[loc,levelId] of Object.entries(LOC_LEVELS)){
       if(st.checked.includes(loc)) continue;
       if(isFinished(levelId)) fireCheck(loc);
