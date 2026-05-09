@@ -52,17 +52,52 @@ window.electron = electron;
 // for PlayerProperties.ts to capture AllPlayerProperties before the game starts.
 // This gives us a live reference to the in-memory player data object.
 (function() {
-  function installAPHooks(AP) {
-    // Intercept ALL unlockPlant calls — block every plant the game tries to
-    // unlock (tutorial rewards, level completion rewards, everything) unless
-    // AP has explicitly granted it via a received item.
-    const _origUnlockPlant = AP.unlockPlant.bind(AP);
-    AP.unlockPlant = function(plantId) {
-      const granted = window._AP_grantedPlantIds || new Set();
-      if (!granted.has(plantId)) return; // not granted by AP yet — block it
-      return _origUnlockPlant(plantId);
-    };
-    AP._ap_hooked = true;
+  // Returns a Proxy around a plantProps object that silently blocks writes for
+  // any plant codename AP hasn't granted yet.  Uses window._AP_CN_TO_ID (set
+  // up in the AP client IIFE after ID_TO_CN is built) to map codename→plantId.
+  function makeGuardedProxy(target) {
+    return new Proxy(target, {
+      set(obj, key, value) {
+        if (typeof key === 'string') {
+          const cnToId = window._AP_CN_TO_ID;
+          if (cnToId && Object.prototype.hasOwnProperty.call(cnToId, key)) {
+            const granted = window._AP_grantedPlantIds || new Set();
+            if (!granted.has(cnToId[key])) return true; // block — not AP-granted
+          }
+        }
+        return Reflect.set(obj, key, value);
+      }
+    });
+  }
+
+  function installAPHooks(app) {
+    // app = AllPlayerProperties game object (not Archipelago)
+
+    // Layer 1: intercept the unlockPlant() API call.
+    if (app.unlockPlant) {
+      const _origUnlockPlant = app.unlockPlant.bind(app);
+      app.unlockPlant = function(plantId) {
+        const granted = window._AP_grantedPlantIds || new Set();
+        if (!granted.has(plantId)) return;
+        return _origUnlockPlant(plantId);
+      };
+    }
+
+    // Layer 2: proxy plantProps so direct property writes are also blocked.
+    // This catches reward code that bypasses unlockPlant() entirely.
+    let _pp = app.plantProps;
+    if (_pp && typeof _pp === 'object') {
+      app.plantProps = makeGuardedProxy(_pp);
+    } else {
+      // plantProps not yet assigned — intercept when the game sets it.
+      Object.defineProperty(app, 'plantProps', {
+        get() { return _pp; },
+        set(v) { _pp = (v && typeof v === 'object') ? makeGuardedProxy(v) : v; },
+        configurable: true, enumerable: true,
+      });
+    }
+
+    app._ap_hooked = true;
   }
 
   const _origRegister = System.register.bind(System);
@@ -170,6 +205,10 @@ window.electron = electron;
     160:'perfumeshroom', 161:'solarsage', 162:'bamboozle',
     164:'cantaloupe', 165:'iceweed',
   };
+
+  // Reverse map exposed for the plantProps Proxy in the SystemJS hook IIFE above.
+  window._AP_CN_TO_ID = {};
+  for (const pid in ID_TO_CN) window._AP_CN_TO_ID[ID_TO_CN[pid]] = Number(pid);
 
   // AP item name -> plant enum ID
   const ITEM_PLANT = {
@@ -1099,25 +1138,48 @@ window.electron = electron;
   // The BASEUNLOCKLIST interceptor handles blocking tutorial plants at source.
   function enforcePlantLocks() {
     if(!isTutorialComplete()) return;
-    if(!st.receivedItems || !st.receivedItems.length) return;
 
     // Rebuild the granted set from received items
     if(!window._AP_grantedPlantIds) window._AP_grantedPlantIds = new Set();
-    st.receivedItems.forEach(name => {
+    if(st.receivedItems) st.receivedItems.forEach(name => {
       const pid = ITEM_PLANT[name];
       if(pid !== undefined) window._AP_grantedPlantIds.add(pid);
     });
 
-    // Re-apply all granted plants (idempotent — game checks progress before setting)
-    if(window._AP_AllPlayerProperties) {
-      st.receivedItems.forEach(name => {
-        const pid = ITEM_PLANT[name];
-        if(pid !== undefined) {
-          try { window._AP_AllPlayerProperties.unlockPlant(pid); } catch(e) {}
-        }
-      });
-      try { window._AP_AllPlayerProperties.savePP(); } catch(e) {}
+    const AP = window._AP_AllPlayerProperties;
+    if(!AP) return;
+
+    // Build the set of authorized codenames
+    const authorizedCns = new Set();
+    for(const pid in ID_TO_CN) {
+      if(window._AP_grantedPlantIds.has(Number(pid))) authorizedCns.add(ID_TO_CN[pid]);
     }
+    const knownCns = new Set(Object.values(ID_TO_CN));
+
+    // Strip unauthorized plants from in-memory plantProps, then save.
+    // Deleting through the Proxy is fine — deleteProperty falls through to the target.
+    let dirty = false;
+    try {
+      const pp = AP.plantProps;
+      if(pp && typeof pp === 'object') {
+        for(const cn of Object.keys(pp)) {
+          if(knownCns.has(cn) && !authorizedCns.has(cn)) {
+            delete pp[cn];
+            dirty = true;
+          }
+        }
+      }
+    } catch(e) {}
+
+    // Re-apply all granted plants (idempotent)
+    if(st.receivedItems) st.receivedItems.forEach(name => {
+      const pid = ITEM_PLANT[name];
+      if(pid !== undefined) {
+        try { AP.unlockPlant(pid); } catch(e) {}
+      }
+    });
+
+    try { AP.savePP(); } catch(e) {}
   }
 
   // forceLevel order for tutorial progression
@@ -1419,7 +1481,9 @@ window.electron = electron;
     try {
       if (typeof cc !== 'undefined' && cc.director)
         cc.director.getScheduler().setTimeScale(_speed);
-    } catch(e) {}
+      else
+        toast(`⚠️ cc not ready`, '#f88');
+    } catch(e) { toast(`⚠️ ${e.message}`, '#f88'); }
     toast(`⏩ ${_speed}x`, '#aaf');
   }
 
@@ -1431,11 +1495,13 @@ window.electron = electron;
     setInterval(pollChecks,2000);
     // Never auto-connect — user must click Connect manually each session
 
-    document.addEventListener('keydown', function(e) {
+    // Use window capture phase so this fires before the game's own keydown
+    // handlers, even if the game canvas calls stopPropagation().
+    window.addEventListener('keydown', function(e) {
       if (e.target.tagName === 'INPUT') return;
       if (e.key === ']') setSpeed(_speed + _SPEED_STEP);
       else if (e.key === '[') setSpeed(_speed - _SPEED_STEP);
-    });
+    }, true);
   }
 
   document.readyState==='loading'
