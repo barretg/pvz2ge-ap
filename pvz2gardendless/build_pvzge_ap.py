@@ -1054,6 +1054,34 @@ window.electron = electron;
     syncGrantedPlants();
   })();
 
+  // ── Save guard ────────────────────────────────────────────────────────────
+  // Intercepts ALL writes to the player save key and strips any plant that AP
+  // has not yet granted. This catches code paths that bypass the unlockPlant()
+  // hook (e.g. the game stored a reference before we patched it, or writes
+  // directly to plantProps without going through unlockPlant at all).
+  (function() {
+    const _origSetItem = Storage.prototype.setItem;
+    Storage.prototype.setItem = function(key, value) {
+      if (key === SAVE_KEY && window._AP_grantedPlantIds) {
+        try {
+          const arr = JSON.parse(value);
+          if (Array.isArray(arr) && arr[0] && arr[0].plantProps) {
+            const authorizedCns = new Set();
+            for (const pid in ID_TO_CN) {
+              if (window._AP_grantedPlantIds.has(Number(pid))) authorizedCns.add(ID_TO_CN[pid]);
+            }
+            const pp = arr[0].plantProps;
+            for (const cn of Object.keys(pp)) {
+              if (!authorizedCns.has(cn)) delete pp[cn];
+            }
+            value = JSON.stringify(arr);
+          }
+        } catch(e) {}
+      }
+      return _origSetItem.call(this, key, value);
+    };
+  })();
+
   const lsCfg  = () => { try { Object.assign(cfg, JSON.parse(localStorage.getItem(CFG_KEY)||'{}')); } catch(e){} };
   const svCfg  = () => localStorage.setItem(CFG_KEY, JSON.stringify(cfg));
   const lsSt   = () => { try { Object.assign(st,  JSON.parse(localStorage.getItem(STATE_KEY)||'{}')); } catch(e){} };
@@ -1323,6 +1351,8 @@ window.electron = electron;
       #ap-panel button:hover{background:#047857}
       #ap-disc{background:#1c1917!important;color:#f87171!important;border-color:#dc2626!important;margin-left:6px}
       #ap-disc:hover{background:#292524!important}
+      #ap-reset{background:#1e1b4b!important;color:#a5b4fc!important;border-color:#6366f1!important;margin-left:6px}
+      #ap-reset:hover{background:#312e81!important}
       #ap-status{margin-top:10px;font-weight:bold;font-size:12px}
       #ap-log{margin-top:8px;max-height:100px;overflow-y:auto;background:#020617;
         border-radius:5px;padding:6px;font-size:10px;color:#64748b;line-height:1.5}
@@ -1343,7 +1373,7 @@ window.electron = electron;
       <label>Server<br><input id=ap-srv placeholder="localhost:38281"></label>
       <label>Slot Name<br><input id=ap-slt placeholder="Player"></label>
       <label>Password<br><input id=ap-pwd type=password placeholder="(optional)"></label>
-      <button id=ap-go>Connect</button><button id=ap-disc>Disconnect</button>
+      <button id=ap-go>Connect</button><button id=ap-disc>Disconnect</button><button id=ap-reset>Reset</button>
       <div id=ap-status style="color:#64748b">Not connected</div>
       <div id=ap-log></div>`;
     document.body.appendChild(panel);
@@ -1365,6 +1395,13 @@ window.electron = electron;
       if(ws){ws.onclose=null;ws.close();ws=null;}
       conn=false;sessionActive=false;setStatus('Disconnected','#f44');
     };
+    document.getElementById('ap-reset').onclick=()=>{
+      if(!confirm('Reset all AP progress for this slot? This clears checked locations, received items, and run state.')) return;
+      st={checked:[],items:[],keys:[],zombosses:0,runKey:''};
+      svSt();
+      window._AP_grantedPlantIds=new Set();
+      log('State reset.');toast('AP state cleared','#a5b4fc');
+    };
 
     const t=document.createElement('div');t.id='ap-toast';
     document.body.appendChild(t);
@@ -1384,6 +1421,19 @@ window.electron = electron;
   }
 
   // ── Init ──────────────────────────────────────────────────────────────────
+  // ── Speed control ────────────────────────────────────────────────────────
+  let _speed = 1.0;
+  const _SPEED_STEP = 0.25, _SPEED_MIN = 0.5, _SPEED_MAX = 8.0;
+
+  function setSpeed(s) {
+    _speed = Math.round(Math.min(_SPEED_MAX, Math.max(_SPEED_MIN, s)) * 100) / 100;
+    try {
+      if (typeof cc !== 'undefined' && cc.director)
+        cc.director.getScheduler().setTimeScale(_speed);
+    } catch(e) {}
+    toast(`⏩ ${_speed}x`, '#aaf');
+  }
+
   function init(){
     lsCfg();lsSt();
     // Re-sync granted set (catches any items received while game was closed)
@@ -1391,6 +1441,12 @@ window.electron = electron;
     buildUI();
     setInterval(pollChecks,2000);
     // Never auto-connect — user must click Connect manually each session
+
+    document.addEventListener('keydown', function(e) {
+      if (e.target.tagName === 'INPUT') return;
+      if (e.key === ']') setSpeed(_speed + _SPEED_STEP);
+      else if (e.key === '[') setSpeed(_speed - _SPEED_STEP);
+    });
   }
 
   document.readyState==='loading'
