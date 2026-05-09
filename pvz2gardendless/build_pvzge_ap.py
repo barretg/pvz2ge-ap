@@ -914,8 +914,29 @@ window.electron = electron;
   ];
 
   // ── State ─────────────────────────────────────────────────────────────────
+  // Rebuild _AP_grantedPlantIds from persisted st.receivedItems.
+  // Called synchronously at IIFE start (before DOMContentLoaded) so the
+  // unlockPlant interceptor has the correct set before any game code runs.
+  function syncGrantedPlants() {
+    if(!window._AP_grantedPlantIds) window._AP_grantedPlantIds = new Set();
+    if(st.receivedItems && st.receivedItems.length){
+      st.receivedItems.forEach(name=>{
+        const pid=ITEM_PLANT[name];
+        if(pid!==undefined) window._AP_grantedPlantIds.add(pid);
+      });
+    }
+  }
+
   let cfg   = { server:'localhost:38281', slot:'', password:'' };
-  let st    = { checked:[], lastIdx:0, zombossesRequired:7, receivedKeys:[], receivedItems:[] };
+  let st    = { checked:[], lastIdx:0, zombossesRequired:7, receivedKeys:[], receivedItems:[], runKey:'' };
+  let sessionActive = false; // set true only after explicit Connect + server ack
+
+  // Load persisted state and rebuild granted set SYNCHRONOUSLY right now,
+  // before DOMContentLoaded fires, so installAPHooks sees the correct set.
+  (function() {
+    try { Object.assign(st, JSON.parse(localStorage.getItem('ap_pvz2_state')||'{}')); } catch(e){}
+    syncGrantedPlants();
+  })();
 
   const lsCfg  = () => { try { Object.assign(cfg, JSON.parse(localStorage.getItem(CFG_KEY)||'{}')); } catch(e){} };
   const svCfg  = () => localStorage.setItem(CFG_KEY, JSON.stringify(cfg));
@@ -1045,7 +1066,7 @@ window.electron = electron;
       ws=new WebSocket(`ws://${cfg.server}`);
       ws.onmessage=e=>{try{JSON.parse(e.data).forEach(onPkt);}catch(ex){}};
       ws.onclose=()=>{
-        conn=false;ws=null;setStatus('Disconnected','#f44');
+        conn=false;sessionActive=false;ws=null;setStatus('Disconnected','#f44');
         rtimer=setTimeout(()=>{rdelay=Math.min(rdelay*1.5,30000);connect();},rdelay);
       };
       ws.onerror=()=>{};
@@ -1058,13 +1079,25 @@ window.electron = electron;
     switch(pkt.cmd){
       case 'RoomInfo':
         rdelay=5000;
+        // Capture seed_name to key our state to this specific run
+        window._AP_seedName = pkt.seed_name || '';
         send([{cmd:'GetDataPackage',games:[GAME_NAME]}]);
         send([{cmd:'Connect',game:GAME_NAME,name:cfg.slot,password:cfg.password||'',
                version:{...AP_VER,class:'Version'},tags:['AP'],items_handling:0b111,
                uuid:'pvz2ge_'+cfg.slot,slot_data:true}]);
         break;
       case 'Connected':
-        conn=true;setStatus('✓ '+cfg.slot,'#4f4');
+        conn=true;sessionActive=true;setStatus('✓ '+cfg.slot,'#4f4');
+        // Check if this is a different seed/slot from last session
+        const runKey = cfg.slot + '@' + (window._AP_seedName||'');
+        if(st.runKey !== runKey){
+          // New seed or new slot — reset all state so old checks/items don't bleed over
+          st = { checked:[], lastIdx:0, zombossesRequired:7,
+                 receivedKeys:[], receivedItems:[], runKey };
+          window._AP_grantedPlantIds = new Set();
+          svSt();
+          toast('New seed detected — state reset','#fa0');
+        }
         if(pkt.slot_data && pkt.slot_data.zombosses_required !== undefined){
           st.zombossesRequired = pkt.slot_data.zombosses_required;
           svSt();
@@ -1072,6 +1105,8 @@ window.electron = electron;
         const ids=st.checked.map(n=>locIds[n]).filter(Boolean);
         if(ids.length) send([{cmd:'LocationChecks',locations:ids}]);
         send([{cmd:'Sync'}]);
+        // Items arrive via ReceivedItems after Sync — enforcePlantLocks
+        // is called from pollChecks which starts now that sessionActive=true
         break;
       case 'ConnectionRefused':
         setStatus('Refused: '+(pkt.errors||[]).join(', '),'#f44');break;
@@ -1123,6 +1158,9 @@ window.electron = electron;
   }
 
   function pollChecks(){
+    // Only check when actively connected — prevents stale saves from
+    // firing checks before the player has loaded into their game
+    if(!conn || !sessionActive) return;
     // Lock tutorial-forced plants and restore only AP-granted ones
     enforcePlantLocks();
     for(const[loc,levelId] of Object.entries(LOC_LEVELS)){
@@ -1209,7 +1247,7 @@ window.electron = electron;
     document.getElementById('ap-disc').onclick=()=>{
       clearTimeout(rtimer);
       if(ws){ws.onclose=null;ws.close();ws=null;}
-      conn=false;setStatus('Disconnected','#f44');
+      conn=false;sessionActive=false;setStatus('Disconnected','#f44');
     };
 
     const t=document.createElement('div');t.id='ap-toast';
@@ -1232,6 +1270,8 @@ window.electron = electron;
   // ── Init ──────────────────────────────────────────────────────────────────
   function init(){
     lsCfg();lsSt();
+    // Re-sync granted set (catches any items received while game was closed)
+    syncGrantedPlants();
     buildUI();
     setInterval(pollChecks,2000);
     // Never auto-connect — user must click Connect manually each session
