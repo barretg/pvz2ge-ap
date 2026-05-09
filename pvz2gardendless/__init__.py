@@ -9,6 +9,8 @@ Victory = defeat the Modern Day Zomboss.
 from worlds.AutoWorld import World, WebWorld
 from BaseClasses import Region, Location, Item, ItemClassification, Tutorial
 from Options import Range, PerGameCommonOptions
+from settings import get_settings
+import settings
 from typing import Dict, List, Any
 import dataclasses
 
@@ -66,6 +68,13 @@ except Exception:
 
 
 # ── Constants ─────────────────────────────────────────────────────────────────
+
+# ── Settings (persisted to host.yaml) ────────────────────────────────────────
+
+class PvZ2Settings(settings.Group):
+    build_directory: str = ""
+    """Directory where the PvZ2 Gardendless Archipelago mod will be built."""
+
 
 GAME_NAME = "PvZ2 Gardendless"
 BASE_ID   = 0xD1A2B3C4
@@ -1060,6 +1069,7 @@ class PvZ2GardendlessWorld(World):
     """
     game = GAME_NAME
     web  = PvZ2Web()
+    settings: PvZ2Settings
     topology_present = True
 
     item_name_to_id     = ITEM_NAME_TO_ID

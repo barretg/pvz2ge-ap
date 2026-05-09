@@ -1418,16 +1418,23 @@ def build(build_dir, log, done_cb, error_cb):
         with open(main_js_path, "r", encoding="utf-8") as f:
             main_js = f.read()
         main_js = main_js.replace("devTools: false", "devTools: true")
-        f12_shortcut = (
-            "globalShortcut.register('F12', () => {\n"
-            "    win.webContents.toggleDevTools();\n"
-            "  });\n\n"
-            "  globalShortcut.register('F11', () => {"
+        # Use before-input-event instead of globalShortcut for F12.
+        # globalShortcut steals keys from the game (breaks F10 GP-Next menu etc).
+        # before-input-event fires in the renderer process so unhandled keys
+        # still reach the game's own keydown listeners.
+        f12_hook = (
+            "  win.webContents.on('before-input-event', (event, input) => {\n"
+            "    if (input.type === 'keyDown' && input.key === 'F12') {\n"
+            "      win.webContents.toggleDevTools();\n"
+            "      event.preventDefault();\n"
+            "    }\n"
+            "  });\n"
         )
-        if "F12" not in main_js:
+        if "before-input-event" not in main_js:
+            # Inject after win.removeMenu() line
             main_js = main_js.replace(
-                "globalShortcut.register('F11', () => {",
-                f12_shortcut
+                "  win.removeMenu(); // hides the top menu bar",
+                "  win.removeMenu(); // hides the top menu bar\n" + f12_hook
             )
         with open(main_js_path, "w", encoding="utf-8") as f:
             f.write(main_js)
@@ -1535,7 +1542,15 @@ class BuilderApp:
         row = tk.Frame(dir_frame, bg=BG)
         row.pack(fill="x", pady=(4, 0))
 
-        self.dir_var = tk.StringVar(value=os.path.normpath(os.path.expanduser("~/pvzge_ap_build")))
+        # Try to load saved build directory from host.yaml
+        saved_dir = ""
+        try:
+            from settings import get_settings
+            saved_dir = str(get_settings().pvz2gardendless.build_directory or "")
+        except Exception:
+            pass
+        default_dir = saved_dir if saved_dir else os.path.normpath(os.path.expanduser("~/pvzge_ap_build"))
+        self.dir_var = tk.StringVar(value=default_dir)
         self.dir_entry = tk.Entry(row, textvariable=self.dir_var, font=FONT,
                                   bg=BG2, fg=TEXT, insertbackground=TEXT,
                                   relief="flat", bd=6)
@@ -1627,6 +1642,13 @@ class BuilderApp:
         if not build_dir:
             self._on_error("Please choose a build folder first.")
             return
+        # Persist chosen directory to host.yaml
+        try:
+            from settings import get_settings
+            get_settings().pvz2gardendless.build_directory = build_dir
+            get_settings().save()
+        except Exception:
+            pass  # non-fatal if settings unavailable
 
         self.build_btn.configure(state="disabled", text="Building…")
         self.log_area.configure(state="normal")
