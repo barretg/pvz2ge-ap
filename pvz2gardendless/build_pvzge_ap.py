@@ -47,6 +47,30 @@ const electron = {
 };
 window.electron = electron;
 
+// ── AP save slot redirect: inject PlayerIndex into PvZ2_Settings reads ────────
+// This runs before any game code, so the game's mainScene.onLoad picks up our
+// slot index when it calls getSettings().PlayerIndex.
+(function(){
+  const AP_SLOT_IDX_KEY = 'ap_pvz2_slot_idx';
+  const SETTINGS_KEY = 'PvZ2_Settings';
+  const _origGet = Storage.prototype.getItem;
+  Storage.prototype.getItem = function(key) {
+    const v = _origGet.call(this, key);
+    if (key === SETTINGS_KEY) {
+      const idxRaw = _origGet.call(this, AP_SLOT_IDX_KEY);
+      const apIdx = parseInt(idxRaw, 10);
+      if (!isNaN(apIdx) && apIdx >= 0) {
+        try {
+          const s = v ? JSON.parse(v) : {};
+          s.PlayerIndex = apIdx;
+          return JSON.stringify(s);
+        } catch(e) {}
+      }
+    }
+    return v;
+  };
+})();
+
 // ── Capture AllPlayerProperties from SystemJS ─────────────────────────────────
 // The game uses SystemJS module loading. We intercept the module registration
 // for PlayerProperties.ts to capture AllPlayerProperties before the game starts.
@@ -70,10 +94,32 @@ window.electron = electron;
     });
   }
 
-  function installAPHooks(app) {
-    // app = AllPlayerProperties game object (not Archipelago)
+  function installCurrentPlayerHooks(cp) {
+    if (!cp || cp._ap_hooked_cp) return;
+    // Intercept plantProps on the current player instance.
+    // Using defineProperty so future reassignments of plantProps are also caught.
+    let _pp = cp.plantProps;
+    if (_pp && typeof _pp === 'object' && !_pp._ap_proxied) {
+      _pp = makeGuardedProxy(_pp);
+      _pp._ap_proxied = true;
+    }
+    Object.defineProperty(cp, 'plantProps', {
+      get() { return _pp; },
+      set(v) {
+        if (v && typeof v === 'object' && !v._ap_proxied) {
+          _pp = makeGuardedProxy(v);
+          _pp._ap_proxied = true;
+        } else { _pp = v; }
+      },
+      configurable: true, enumerable: true,
+    });
+    cp._ap_hooked_cp = true;
+  }
 
-    // Layer 1: intercept the unlockPlant() API call.
+  function installAPHooks(app) {
+    // app = AllPlayerProperties (static class, not an instance)
+
+    // Layer 1: intercept the static unlockPlant() method.
     if (app.unlockPlant) {
       const _origUnlockPlant = app.unlockPlant.bind(app);
       app.unlockPlant = function(plantId) {
@@ -83,18 +129,16 @@ window.electron = electron;
       };
     }
 
-    // Layer 2: proxy plantProps so direct property writes are also blocked.
-    // This catches reward code that bypasses unlockPlant() entirely.
-    let _pp = app.plantProps;
-    if (_pp && typeof _pp === 'object') {
-      app.plantProps = makeGuardedProxy(_pp);
-    } else {
-      // plantProps not yet assigned — intercept when the game sets it.
-      Object.defineProperty(app, 'plantProps', {
-        get() { return _pp; },
-        set(v) { _pp = (v && typeof v === 'object') ? makeGuardedProxy(v) : v; },
-        configurable: true, enumerable: true,
-      });
+    // Layer 2: hook getPlayer so we install a plantProps Proxy on whichever
+    // currentPlayer slot the game (or we) load.  AllPlayerProperties.plantProps
+    // is undefined — the real data lives on currentPlayer.plantProps.
+    if (app.getPlayer) {
+      const _origGetPlayer = app.getPlayer.bind(app);
+      app.getPlayer = function(idx) {
+        const result = _origGetPlayer(idx);
+        installCurrentPlayerHooks(app.currentPlayer);
+        return result;
+      };
     }
 
     app._ap_hooked = true;
@@ -124,11 +168,15 @@ window.electron = electron;
 (function () {
   'use strict';
 
-  const SAVE_KEY   = 'PvZ2_PlayerProperties';
-  const CFG_KEY    = 'ap_pvz2_cfg';
-  const STATE_KEY  = 'ap_pvz2_state';
-  const GAME_NAME  = 'PvZ2 Gardendless';
-  const AP_VER     = { major: 0, minor: 6, build: 7 };
+  const SAVE_KEY        = 'PvZ2_PlayerProperties';
+  const SETTINGS_KEY    = 'PvZ2_Settings';
+  const AP_SLOT_IDX_KEY = 'ap_pvz2_slot_idx';
+  const CFG_KEY         = 'ap_pvz2_cfg';
+  const STATE_KEY       = 'ap_pvz2_state';
+  const GAME_NAME       = 'PvZ2 Gardendless';
+  const AP_VER          = { major: 0, minor: 6, build: 7 };
+
+  let skipTutorial = false; // set from slot_data on Connected
 
   // World enum IDs (from WorldMapSceneDisplayEnum in game source)
   // World enum IDs (WorldMapSceneDisplayEnum from game source)
@@ -1084,26 +1132,27 @@ window.electron = electron;
   })();
 
   // ── Save guard ────────────────────────────────────────────────────────────
-  // Intercepts ALL writes to the player save key and strips any plant that AP
-  // has not yet granted. This catches code paths that bypass the unlockPlant()
-  // hook (e.g. the game stored a reference before we patched it, or writes
-  // directly to plantProps without going through unlockPlant at all).
+  // Intercepts ALL writes to PvZ2_PlayerProperties and strips unauthorized
+  // plants from the AP-managed slot before they hit localStorage.
   (function() {
     const _origSetItem = Storage.prototype.setItem;
     Storage.prototype.setItem = function(key, value) {
       if (key === SAVE_KEY && window._AP_grantedPlantIds) {
         try {
+          const apIdx = parseInt(localStorage.getItem(AP_SLOT_IDX_KEY), 10);
           const arr = JSON.parse(value);
-          if (Array.isArray(arr) && arr[0] && arr[0].plantProps) {
-            const authorizedCns = new Set();
-            for (const pid in ID_TO_CN) {
-              if (window._AP_grantedPlantIds.has(Number(pid))) authorizedCns.add(ID_TO_CN[pid]);
+          if (Array.isArray(arr)) {
+            const p = !isNaN(apIdx) ? arr[apIdx] : null;
+            if (p && p.plantProps) {
+              const authorizedCns = new Set();
+              for (const pid in ID_TO_CN) {
+                if (window._AP_grantedPlantIds.has(Number(pid))) authorizedCns.add(ID_TO_CN[pid]);
+              }
+              for (const cn of Object.keys(p.plantProps)) {
+                if (!authorizedCns.has(cn)) delete p.plantProps[cn];
+              }
+              value = JSON.stringify(arr);
             }
-            const pp = arr[0].plantProps;
-            for (const cn of Object.keys(pp)) {
-              if (!authorizedCns.has(cn)) delete pp[cn];
-            }
-            value = JSON.stringify(arr);
           }
         } catch(e) {}
       }
@@ -1116,137 +1165,122 @@ window.electron = electron;
   const lsSt   = () => { try { Object.assign(st,  JSON.parse(localStorage.getItem(STATE_KEY)||'{}')); } catch(e){} };
   const svSt   = () => localStorage.setItem(STATE_KEY, JSON.stringify(st));
 
-  // ── Save data access ──────────────────────────────────────────────────────
-  function readSave() {
-    try { const r=localStorage.getItem(SAVE_KEY); if(!r) return null; const a=JSON.parse(r); return Array.isArray(a)?a:[a]; } catch(e){return null;}
+  // ── AP-managed save slot ──────────────────────────────────────────────────
+  // Finds or creates a slot marked _ap_managed in PvZ2_PlayerProperties,
+  // stores its index, and updates PvZ2_Settings.PlayerIndex so the game
+  // always loads our slot on startup (the getItem intercept enforces this).
+  function findOrCreateAPSlot() {
+    try {
+      const raw = localStorage.getItem(SAVE_KEY);
+      const allPlayers = raw ? JSON.parse(raw) : [];
+      let apIdx = allPlayers.findIndex(p => p && p._ap_managed === true);
+      if(apIdx < 0) {
+        apIdx = allPlayers.length;
+        allPlayers.push({ _ap_managed: true, name: 'AP Multiworld' });
+        localStorage.setItem(SAVE_KEY, JSON.stringify(allPlayers));
+      }
+      localStorage.setItem(AP_SLOT_IDX_KEY, String(apIdx));
+      try {
+        const sRaw = localStorage.getItem(SETTINGS_KEY);
+        const s = sRaw ? JSON.parse(sRaw) : {};
+        s.PlayerIndex = apIdx;
+        localStorage.setItem(SETTINGS_KEY, JSON.stringify(s));
+      } catch(e) {}
+      return apIdx;
+    } catch(e) { log('Error creating AP slot: ' + e); return -1; }
   }
-  function writeSave(arr) { localStorage.setItem(SAVE_KEY, JSON.stringify(arr)); }
 
-  // Returns true if the player has completed the tutorial (forceLevel is past tutorials)
-  function isTutorialComplete() {
-    const p = window._AP_AllPlayerProperties;
-    const fl = (p ? p.forceLevel : null) ?? (()=>{const a=readSave();return a&&a[0]?a[0].forceLevel:null;})() || '';
-    return !['tutorial1','tutorial2','tutorial3','tutorial4'].includes(fl);
-  }
+  // Reconstructs the AP save slot entirely from AP state.
+  // Plants = received items; level progress = checked locations; worlds = received keys.
+  // Called after Connected, after each ReceivedItems, and in the poll loop.
+  function rebuildAPSave() {
+    const APP = window._AP_AllPlayerProperties;
+    if(!APP || !APP.currentPlayer) return;
+    const cp = APP.currentPlayer;
 
-  // Lock the 4 tutorial-forced plants and re-apply only what AP has sent
-  // Call this after tutorial completes and whenever items arrive
-  // Rebuild _AP_grantedPlantIds from st.receivedItems and re-apply all
-  // received plant unlocks. Called on connect, item receipt, and every poll.
-  // The BASEUNLOCKLIST interceptor handles blocking tutorial plants at source.
-  function enforcePlantLocks() {
-    console.log('[enforce] called — tutorialComplete=' + isTutorialComplete()
-      + ' APP=' + !!window._AP_AllPlayerProperties
-      + ' granted=' + (window._AP_grantedPlantIds ? window._AP_grantedPlantIds.size : 'null'));
-    if(!isTutorialComplete()) return;
-
-    // Rebuild the granted set from received items
+    // 1. Rebuild granted plant set
     if(!window._AP_grantedPlantIds) window._AP_grantedPlantIds = new Set();
-    if(st.receivedItems) st.receivedItems.forEach(name => {
+    else window._AP_grantedPlantIds.clear();
+    (st.receivedItems||[]).forEach(name => {
       const pid = ITEM_PLANT[name];
       if(pid !== undefined) window._AP_grantedPlantIds.add(pid);
     });
 
-    // Build authorized / known codename sets
-    const authorizedCns = new Set();
-    for(const pid in ID_TO_CN) {
-      if(window._AP_grantedPlantIds.has(Number(pid))) authorizedCns.add(ID_TO_CN[pid]);
-    }
+    // 2. Clear all AP-known plants, then grant only received ones
     const knownCns = new Set(Object.values(ID_TO_CN));
-
-    // Clean in-memory plantProps via AllPlayerProperties
-    const APP = window._AP_AllPlayerProperties;
-    if(APP) {
-      try {
-        const pp = APP.plantProps;
-        if(pp && typeof pp === 'object') {
-          const removed = [];
-          for(const cn of Object.keys(pp)) {
-            if(knownCns.has(cn) && !authorizedCns.has(cn)) {
-              delete pp[cn];
-              removed.push(cn);
-            }
-          }
-          if(removed.length) console.log('[enforce] removed from memory: ' + removed.join(', '));
-        }
-      } catch(e) { console.log('[enforce] memory error: ' + e); }
-
-      // Re-apply all granted plants then save
-      if(st.receivedItems) st.receivedItems.forEach(name => {
-        const pid = ITEM_PLANT[name];
-        if(pid !== undefined) try { APP.unlockPlant(pid); } catch(e) {}
-      });
-      try { APP.savePP(); } catch(e) {}
+    if(!cp.plantProps) cp.plantProps = {};
+    for(const cn of Object.keys(cp.plantProps)) {
+      if(knownCns.has(cn)) delete cp.plantProps[cn];
     }
+    for(const pid of window._AP_grantedPlantIds) {
+      const cn = ID_TO_CN[pid];
+      if(cn) cp.plantProps[cn] = {progress:1,medal:false,tutorialLevel:0,boost:0,costume:-1,costumes:[]};
+    }
+
+    // 3. Reset AP-tracked level progress, then restore checked locations
+    if(!cp.levelProps) cp.levelProps = {};
+    for(const lvl of new Set(Object.values(LOC_LEVELS))) delete cp.levelProps[lvl];
+    for(const locName of (st.checked||[])) {
+      const lvl = LOC_LEVELS[locName];
+      if(lvl) cp.levelProps[lvl] = { progress: 3 };
+    }
+
+    // 4. Unlock worlds for received keys
+    if(!cp.worldProps) cp.worldProps = {};
+    (st.receivedKeys||[]).forEach(keyName => {
+      const worldIds = WORLD_KEY_MAP[keyName];
+      if(worldIds) worldIds.forEach(wid => {
+        if(!cp.worldProps[wid]) cp.worldProps[wid] = {};
+        cp.worldProps[wid].unlocked = true;
+      });
+    });
+
+    // 5. Set forceLevel based on tutorial progress
+    const tutSteps = ['tutorial1','tutorial2','tutorial3','tutorial4'];
+    if(skipTutorial) {
+      cp.forceLevel = '';
+    } else {
+      let fl = 'tutorial1';
+      for(const tut of tutSteps) {
+        const loc = Object.keys(LOC_LEVELS).find(k => LOC_LEVELS[k] === tut);
+        if(loc && (st.checked||[]).includes(loc)) {
+          const ni = tutSteps.indexOf(tut) + 1;
+          fl = ni < tutSteps.length ? tutSteps[ni] : '';
+        } else { break; }
+      }
+      cp.forceLevel = fl;
+    }
+
+    try { APP.savePP(); } catch(e) {}
   }
 
   // forceLevel order for tutorial progression
   const TUTORIAL_ORDER = ['tutorial1','tutorial2','tutorial3','tutorial4','egypt1'];
 
+  function isTutorialComplete() {
+    const APP = window._AP_AllPlayerProperties;
+    const fl = (APP && APP.currentPlayer ? APP.currentPlayer.forceLevel : null) || '';
+    return !['tutorial1','tutorial2','tutorial3','tutorial4'].includes(fl);
+  }
+
   function isTutorialDone(tutorialId) {
-    // tutorial N is done if forceLevel has advanced past it
-    const app = window._AP_AllPlayerProperties;
-    const forceLevel = (app ? app.forceLevel : null) ?? (()=>{const a=readSave();return a&&a[0]?a[0].forceLevel:null;})() || '';
+    const APP = window._AP_AllPlayerProperties;
+    const forceLevel = (APP && APP.currentPlayer ? APP.currentPlayer.forceLevel : null) || '';
     const myIdx = TUTORIAL_ORDER.indexOf(tutorialId);
     if(myIdx < 0) return false;
-    // Done if forceLevel is a later tutorial, egypt1, or empty (already on worldmap)
-    if(forceLevel === '') return true;  // past all tutorials
+    if(forceLevel === '') return true;
     const forceLevelIdx = TUTORIAL_ORDER.indexOf(forceLevel);
-    if(forceLevelIdx < 0) return true;  // some other world level = past tutorials
+    if(forceLevelIdx < 0) return true;
     return forceLevelIdx > myIdx;
   }
 
   function isFinished(levelId) {
     if(TUTORIAL_ORDER.includes(levelId)) return isTutorialDone(levelId);
-    // Prefer live in-memory data (slot-agnostic); fall back to localStorage slot 0
-    const app = window._AP_AllPlayerProperties;
-    const lp = app ? app.levelProps : (()=>{const a=readSave();return a&&a[0]?a[0].levelProps:null;})();
+    const APP = window._AP_AllPlayerProperties;
+    const cp = APP ? APP.currentPlayer : null;
+    const lp = cp ? cp.levelProps : null;
     if(!lp) return false;
-    // progress=3 (unlocked_willbeFinished) is set immediately on level win by victory()
-    // progress=4 (finished) is set later by worldmap node animation - we don't want to wait
-    const e=lp[levelId]; return e && (e.progress||0)>=3;
-  }
-
-  function unlockPlant(plantId) {
-    // Register this plant as AP-granted so the BASEUNLOCKLIST interceptor
-    // allows it through when the game calls unlockPlant internally
-    if(!window._AP_grantedPlantIds) window._AP_grantedPlantIds = new Set();
-    window._AP_grantedPlantIds.add(plantId);
-
-    // Prefer live in-memory API (instant, no reload required)
-    if(window._AP_AllPlayerProperties) {
-      try {
-        window._AP_AllPlayerProperties.unlockPlant(plantId);
-        window._AP_AllPlayerProperties.savePP();
-        return;
-      } catch(e) { /* fall through to localStorage method */ }
-    }
-    // Fallback: write to localStorage (picked up on next game load)
-    const arr=readSave(); if(!arr) return;
-    const p=arr[0]; if(!p) return;
-    if(!p.plantProps) p.plantProps={};
-    const cn=ID_TO_CN[plantId]; if(!cn) return;
-    const cur=p.plantProps[cn];
-    if(!cur||(cur.progress||0)<1) p.plantProps[cn]={progress:1,medal:false,tutorialLevel:0,boost:0,costume:-1,costumes:[]};
-    writeSave(arr);
-  }
-
-  function unlockWorld(worldId) {
-    // Prefer live in-memory API
-    if(window._AP_AllPlayerProperties) {
-      try {
-        window._AP_AllPlayerProperties.unlockWorld(worldId);
-        window._AP_AllPlayerProperties.savePP();
-        return;
-      } catch(e) { /* fall through */ }
-    }
-    // Fallback: localStorage
-    const arr=readSave(); if(!arr) return;
-    const p=arr[0]; if(!p) return;
-    if(!p.worldProps) p.worldProps={};
-    if(!p.worldProps[worldId]) p.worldProps[worldId]={};
-    p.worldProps[worldId].unlocked=true;
-    writeSave(arr);
+    const e = lp[levelId]; return e && (e.progress||0) >= 3;
   }
 
   // ── WebSocket / AP Protocol ───────────────────────────────────────────────
@@ -1255,6 +1289,16 @@ window.electron = electron;
 
   function connect() {
     if(!cfg.slot){setStatus('Enter slot name','#fa0');return;}
+    // First connect: create the dedicated AP save slot, then reload so the game
+    // loads it fresh (the getItem intercept will redirect PlayerIndex going forward).
+    if(!localStorage.getItem(AP_SLOT_IDX_KEY)) {
+      const apIdx = findOrCreateAPSlot();
+      if(apIdx < 0) { setStatus('Could not create AP save slot','#f44'); return; }
+      log('AP save slot created at index ' + apIdx + ' — reloading…');
+      toast('AP save created — reloading…','#fa0');
+      setTimeout(()=>window.location.reload(), 1500);
+      return;
+    }
     if(ws){try{ws.onclose=null;ws.close();}catch(e){}ws=null;}
     setStatus('Connecting…','#fa0');
     try {
@@ -1286,31 +1330,20 @@ window.electron = electron;
         // Check if this is a different seed/slot from last session
         const runKey = cfg.slot + '@' + (window._AP_seedName||'');
         if(st.runKey !== runKey){
-          // New seed or new slot — reset all state so old checks/items don't bleed over
           st = { checked:[], lastIdx:0, receivedKeys:[], receivedItems:[], runKey };
           window._AP_grantedPlantIds = new Set();
           svSt();
           toast('New seed detected — state reset','#fa0');
         }
         if(pkt.slot_data){
-          goalLocs  = pkt.slot_data.goal_locations  || [];
-          worldsReq = pkt.slot_data.worlds_required || 7;
-          if(pkt.slot_data.skip_tutorial){
-            try {
-              const arr=readSave();
-              if(arr && arr[0] && TUTORIAL_ORDER.includes(arr[0].forceLevel||'')){
-                arr[0].forceLevel='';
-                writeSave(arr);
-                log('Tutorial skipped — starting on world map');
-              }
-            } catch(e){}
-          }
+          goalLocs     = pkt.slot_data.goal_locations  || [];
+          worldsReq    = pkt.slot_data.worlds_required || 7;
+          skipTutorial = !!pkt.slot_data.skip_tutorial;
         }
+        rebuildAPSave();
         const ids=st.checked.map(n=>locIds[n]).filter(Boolean);
         if(ids.length) send([{cmd:'LocationChecks',locations:ids}]);
         send([{cmd:'Sync'}]);
-        // Items arrive via ReceivedItems after Sync — enforcePlantLocks
-        // is called from pollChecks which starts now that sessionActive=true
         break;
       case 'ConnectionRefused':
         setStatus('Refused: '+(pkt.errors||[]).join(', '),'#f44');break;
@@ -1320,14 +1353,15 @@ window.electron = electron;
           if(gi<st.lastIdx) return;
           const name=itemNames[item.item];
           if(name){
-            // Track all received items for enforcePlantLocks replay
             if(!st.receivedItems) st.receivedItems=[];
             if(!st.receivedItems.includes(name)) st.receivedItems.push(name);
             applyItem(name);
           }
           st.lastIdx=gi+1;
         });
-        svSt();break;
+        svSt();
+        rebuildAPSave();
+        break;
       case 'DataPackage':
         const gd=pkt.data&&pkt.data.games&&pkt.data.games[GAME_NAME];
         if(gd){
@@ -1340,17 +1374,15 @@ window.electron = electron;
   }
 
   function applyItem(name) {
+    // Track keys for Modern Day check; actual game-state changes happen in rebuildAPSave
     if(WORLD_KEY_MAP[name]){
-      WORLD_KEY_MAP[name].forEach(w=>unlockWorld(w));
-      toast('🔑 '+name,'#fa0');
-      // Track received keys for Modern Day unlock check
       if(!st.receivedKeys) st.receivedKeys=[];
       if(!st.receivedKeys.includes(name)) st.receivedKeys.push(name);
       svSt();
+      toast('🔑 '+name,'#fa0');
       return;
     }
-    const pid=ITEM_PLANT[name];
-    if(pid!==undefined){unlockPlant(pid);toast('🌱 '+name,'#4f4');return;}
+    if(ITEM_PLANT[name]!==undefined){ toast('🌱 '+name,'#4f4'); return; }
     toast('📦 '+name,'#4af');
   }
 
@@ -1362,10 +1394,7 @@ window.electron = electron;
   }
 
   function pollChecks(){
-    // Plant enforcement runs regardless of connection state — unauthorized
-    // plants should be purged even before the player connects to AP.
-    enforcePlantLocks();
-    // Only fire location checks when actively connected
+    rebuildAPSave();
     if(!conn || !sessionActive) return;
     for(const[loc,levelId] of Object.entries(LOC_LEVELS)){
       if(st.checked.includes(loc)) continue;
